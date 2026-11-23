@@ -1,8 +1,9 @@
 --[[
-    AvatarHub - Auto Copy Avatar ao morrer (roda no CLIENTE / executor)
+    AvatarHub (roda no CLIENTE / executor)
 
-    Ao morrer: espera o respawn -> equipa o Tool -> escreve o nick na caixa
-    de texto do item -> clica no botão "Copy".
+    Aba exclusiva do Ro-vibes (só aparece nesse jogo): ao morrer espera o
+    respawn -> equipa o Tool -> escreve o nick na caixa de texto do item ->
+    clica no botão "Copy".
     O script acha a TextBox e o botão pelo tipo/texto; se o jogo usar outros
     nomes, ajuste o CONFIG.
 ]]
@@ -27,6 +28,8 @@ local CONFIG = {
     HEADSIT_HEIGHT = 1.8,       -- altura acima da cabeça ao sentar
     SERVER_PAGES = 5,           -- páginas (100 servidores cada) na lista de servidores
     OWNER_TAG = "OWNER",        -- tag mostrada no seu perfil
+    GAME_TAB_NAME = "Rovibes",  -- nome da aba exclusiva do jogo
+    ROVIBES_PLACE_IDS = {},     -- (opcional) PlaceIds do jogo, se a detecção pelo nome falhar
 }
 
 ----------------------------------------------------------------
@@ -43,12 +46,53 @@ local player             = Players.LocalPlayer
 
 local autoEnabled = true -- rodar automaticamente ao morrer
 local running     = false
+local alive       = true -- vira false quando o script é morto
 local menuGui            -- ScreenGui do menu (pra ignorar na busca da GUI do jogo)
 local statusHook         -- recebe as mensagens de print/warn
+local conns, killHooks = {}, {} -- conexões globais e rotinas de limpeza
+local isRovibes = false  -- true quando o jogo atual é o Ro-vibes
+local gameInfo = { name = nil, ready = false }
+local onGameReady        -- o menu define: reage à detecção do jogo
 
 local _print, _warn = print, warn
 local function print(msg) _print(msg); if statusHook then statusHook(msg, false) end end
 local function warn(msg)  _warn(msg);  if statusHook then statusHook(msg, true)  end end
+
+-- conecta um evento global guardando a conexão (para o "Matar script" desligar tudo)
+local function on(signal, fn)
+    local c = signal:Connect(fn)
+    table.insert(conns, c)
+    return c
+end
+
+local function killScript()
+    if not alive then return end
+    alive = false
+    for _, f in ipairs(killHooks) do pcall(f) end
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    table.clear(conns)
+    autoEnabled, running, statusHook = false, false, nil
+    if menuGui then pcall(function() menuGui:Destroy() end) end
+    menuGui = nil
+    _print("[AvatarHub] Script encerrado.")
+end
+
+-- executar de novo mata a instância anterior (evita conexões duplicadas)
+local env = (typeof(getgenv) == "function" and getgenv()) or _G
+if typeof(env.__AvatarHubKill) == "function" then pcall(env.__AvatarHubKill) end
+env.__AvatarHubKill = killScript
+
+-- detecta se o jogo atual é o Ro-vibes (pelo nome, ou pelos PlaceIds do CONFIG)
+local function detectGame()
+    local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+    gameInfo.name = ok and info and info.Name or nil
+    local n = (gameInfo.name or ""):lower():gsub("[^%w]", "")
+    isRovibes = table.find(CONFIG.ROVIBES_PLACE_IDS, game.PlaceId) ~= nil
+        or n:find("rovibes", 1, true) ~= nil or n:find("robibes", 1, true) ~= nil
+    gameInfo.ready = true
+    if alive and onGameReady then onGameReady() end
+end
+task.spawn(detectGame)
 
 local function char() return player.Character end
 local function root(c) return c and c:FindFirstChild("HumanoidRootPart") end
@@ -64,7 +108,7 @@ end
 
 local function waitForTool(name)
     local deadline = os.clock() + CONFIG.TIMEOUT
-    while os.clock() < deadline do
+    while os.clock() < deadline and alive do
         local tool = (char() and char():FindFirstChild(name)) or player.Backpack:FindFirstChild(name)
         if tool and tool:IsA("Tool") then return tool end
         task.wait(0.2)
@@ -156,7 +200,7 @@ local function clickButton(btn)
 end
 
 local function doRoutine()
-    if running then return end
+    if running or not alive then return end
     running = true
 
     local function stop(msg)
@@ -176,7 +220,7 @@ local function doRoutine()
     -- ativa o item até a caixa de texto aparecer
     local box
     local deadline, lastActivate = os.clock() + CONFIG.TIMEOUT, 0
-    while not box and os.clock() < deadline do
+    while not box and os.clock() < deadline and alive do
         if os.clock() - lastActivate >= CONFIG.RETRY_EVERY then
             if tool.Parent ~= char() then equipTool(tool); task.wait(0.2) end
             activateTool(tool)
@@ -202,25 +246,28 @@ local function doRoutine()
     running = false
 end
 
+-- só roda no Ro-vibes (as funções ficam na aba exclusiva do jogo)
+local function canAuto() return alive and autoEnabled and isRovibes end
+
 local function onCharacter(c)
     local hum = c:WaitForChild("Humanoid", 10)
-    if not hum then return end
-    hum.Died:Connect(function()
-        if not autoEnabled then return end
+    if not hum or not alive then return end
+    on(hum.Died, function()
+        if not canAuto() then return end
         print("[AutoCopy] Você morreu. Aguardando respawn...")
         local newChar = player.CharacterAdded:Wait()
         newChar:WaitForChild("Humanoid", 10)
         task.wait(1)
-        if autoEnabled then doRoutine() end
+        if canAuto() then doRoutine() end
     end)
 end
-if player.Character then onCharacter(player.Character) end
-player.CharacterAdded:Connect(onCharacter)
+if player.Character then task.spawn(onCharacter, player.Character) end
+on(player.CharacterAdded, onCharacter)
 
 ----------------------------------------------------------------
 -- MOVEMENT: CLICK TP + ANTI AFK
 ----------------------------------------------------------------
-UserInputService.InputBegan:Connect(function(input, processed)
+on(UserInputService.InputBegan, function(input, processed)
     if processed or not CONFIG.CLICK_TP then return end
     if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
     if CONFIG.CLICK_TP_CTRL and not (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
@@ -240,7 +287,7 @@ UserInputService.InputBegan:Connect(function(input, processed)
     end
 end)
 
-player.Idled:Connect(function()
+on(player.Idled, function()
     if not CONFIG.ANTI_AFK then return end
     pcall(function()
         local vu = game:GetService("VirtualUser")
@@ -441,8 +488,11 @@ local function buildMenu()
 
     local refreshers, logLabels = {}, {}
     local function refreshAll() for _, f in ipairs(refreshers) do f() end end
-    local nickBox, runNow, loadServers, renderFavs, showPage
+    local nickBox, runNow, loadServers, renderFavs, showPage, renderPlayers
     local capturingKey = false
+    local rovibesOnly = {} -- elementos que só aparecem no Ro-vibes
+    local rvName           -- nome do jogo na aba exclusiva
+    local gameIcon = "rbxthumb://type=GameIcon&id=" .. game.GameId .. "&w=150&h=150"
 
     local function useNick(name)
         CONFIG.TARGET_NICK = name
@@ -615,12 +665,14 @@ local function buildMenu()
         b.MouseButton1Click:Connect(function() set(not get()); refreshAll() end)
         table.insert(refreshers, refresh)
         refresh()
+        return b
     end
 
     local function actionTile(target, title, sub, fn)
         local b = tile(target, title, sub, C.accent)
         b.AutoButtonColor = true
         b.MouseButton1Click:Connect(fn)
+        return b
     end
 
     local function primaryButton(target, text, fn)
@@ -696,8 +748,9 @@ local function buildMenu()
         label(b, sub, 10, C.muted, FONT, UDim2.new(0, 58, 0, 31), UDim2.new(1, -90, 0, 14))
         label(b, ">", 14, C.muted, FONTB, UDim2.new(1, -26, 0.5, -9), UDim2.new(0, 14, 0, 18), CENTER)
         b.MouseButton1Click:Connect(function() openPage(target) end)
+        return b
     end
-    navCard("Avatar", "Nick, cópia e testes", "AV", "avatar")
+    table.insert(rovibesOnly, navCard(CONFIG.GAME_TAB_NAME, "Auto equipar avatar", "RV", "rovibes"))
     navCard("Stalk", "Jogadores do servidor", "ST", "stalk")
     navCard("Movement", "Click TP e movimento", "MV", "movement")
     navCard("Configurações", "Item, botão e tempos", "CF", "config")
@@ -729,16 +782,12 @@ local function buildMenu()
         task.delay(1.5, function() copySrv.Text = "Copiar servidor" end)
     end)
 
-    task.spawn(function()
-        local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
-        gameName.Text = (ok and info and info.Name) or "Jogo atual"
-    end)
     local function updatePlayers()
         playersLbl.Text = ("%d / %d jogadores"):format(#Players:GetPlayers(), Players.MaxPlayers)
     end
     updatePlayers()
-    Players.PlayerAdded:Connect(updatePlayers)
-    Players.PlayerRemoving:Connect(function() task.defer(updatePlayers) end)
+    on(Players.PlayerAdded, updatePlayers)
+    on(Players.PlayerRemoving, function() task.defer(updatePlayers) end)
 
     -- favoritos rápidos
     local favs = new("Frame", { Size = UDim2.new(0.58, -5, 1, 0), Position = UDim2.new(0.42, 5, 0, 0),
@@ -752,24 +801,31 @@ local function buildMenu()
         SortOrder = Enum.SortOrder.LayoutOrder }, favGrid)
 
     local function autoToggle(target)
-        toggleTile(target, "Auto ao morrer", function() return autoEnabled end, function(v) autoEnabled = v end)
+        return toggleTile(target, "Auto ao morrer", function() return autoEnabled end, function(v) autoEnabled = v end)
     end
     local function screenClickToggle(target)
-        toggleTile(target, "Clique na tela", function() return CONFIG.USE_SCREEN_CLICK end,
+        return toggleTile(target, "Clique na tela", function() return CONFIG.USE_SCREEN_CLICK end,
             function(v) CONFIG.USE_SCREEN_CLICK = v end)
     end
     local function clickTpToggle(target)
-        toggleTile(target, "Click TP", function() return CONFIG.CLICK_TP end, function(v) CONFIG.CLICK_TP = v end)
+        return toggleTile(target, "Click TP", function() return CONFIG.CLICK_TP end, function(v) CONFIG.CLICK_TP = v end)
     end
-    autoToggle(favGrid)
-    screenClickToggle(favGrid)
+    table.insert(rovibesOnly, autoToggle(favGrid))
+    table.insert(rovibesOnly, screenClickToggle(favGrid))
     clickTpToggle(favGrid)
-    actionTile(favGrid, "Ativar agora", "Executar", function() runNow() end)
+    table.insert(rovibesOnly, actionTile(favGrid, "Ativar agora", "Executar", function() runNow() end))
 
     ------------------------------------------------------------
     -- AVATAR
     ------------------------------------------------------------
-    local av = newPage("avatar", "Avatar", "Escolha o jogador e execute a cópia.")
+    local av = newPage("rovibes", CONFIG.GAME_TAB_NAME, "Funções exclusivas deste jogo.")
+
+    local rvBanner = panel(av, 64)
+    round(new("ImageLabel", { Size = UDim2.new(0, 44, 0, 44), Position = UDim2.new(0, 12, 0, 10),
+        BackgroundColor3 = C.panel2, BorderSizePixel = 0, Image = gameIcon }, rvBanner), 10)
+    rvName = label(rvBanner, CONFIG.GAME_TAB_NAME, 14, C.text, FONTB, UDim2.new(0, 68, 0, 12), UDim2.new(1, -80, 0, 18))
+    label(rvBanner, "Auto equipar avatar e copiar aparência", 10, C.muted, FONT,
+        UDim2.new(0, 68, 0, 34), UDim2.new(1, -80, 0, 14))
 
     local nickPanel = panel(av, 118)
     label(nickPanel, "Nickname alvo", 12, C.text, FONTB, UDim2.new(0, 16, 0, 12), UDim2.new(1, -32, 0, 16))
@@ -910,6 +966,14 @@ local function buildMenu()
         end)
     end)
 
+    local killRow = panel(cfg, 54)
+    label(killRow, "Matar script", 12, C.text, FONTB, UDim2.new(0, 16, 0, 10), UDim2.new(1, -190, 0, 16))
+    label(killRow, "Desliga tudo e remove o menu (útil para testar)", 10, C.muted, FONT,
+        UDim2.new(0, 16, 0, 29), UDim2.new(1, -190, 0, 14))
+    local killBtn = button(killRow, "Matar script", C.blood, UDim2.new(0, 140, 0, 30), UDim2.new(1, -156, 0.5, -15))
+    stroke(killBtn, C.accent)
+    killBtn.MouseButton1Click:Connect(killScript)
+
     ------------------------------------------------------------
     -- MOVEMENT
     ------------------------------------------------------------
@@ -1011,7 +1075,7 @@ local function buildMenu()
                 pagesDone += 1
                 srvStatus.Text = ("Buscando... %d servidores"):format(#all)
                 if cursor then task.wait(0.4) end
-            until not cursor or pagesDone >= CONFIG.SERVER_PAGES
+            until not cursor or pagesDone >= CONFIG.SERVER_PAGES or not alive
 
             if #all > 0 then srvData = all end
             renderServers()
@@ -1035,7 +1099,7 @@ local function buildMenu()
         sortBtn.Text = "Ordem: " .. (srvSort == "players" and "Players" or "Ping")
         renderServers()
     end)
-    TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
+    on(TeleportService.TeleportInitFailed, function(_, result, msg)
         say(srvStatus, "Falha ao teleportar: " .. tostring(msg or result), C.bad)
     end)
 
@@ -1056,7 +1120,6 @@ local function buildMenu()
 
     local selected, spectating, attachMode, attachTarget, statusMsg
     local ui = {} -- botões/labels da linha expandida atual
-    local renderPlayers
 
     local function refreshDetail(msg)
         if msg then statusMsg = msg end
@@ -1110,9 +1173,13 @@ local function buildMenu()
         selected, statusMsg = nil, nil
         renderPlayers()
     end
+    table.insert(killHooks, function()
+        if spectating then stopSpectate() end
+        if attachMode then stopAttach() end
+    end)
 
     -- mantém você grudado/sentado no alvo e a câmera nele (a cada frame)
-    RunService.Heartbeat:Connect(function()
+    on(RunService.Heartbeat, function()
         if attachMode then
             if not attachTarget or attachTarget.Parent ~= Players then
                 stopAttach("Jogador saiu do servidor")
@@ -1171,7 +1238,7 @@ local function buildMenu()
             local expanded = (selected == p) and not isMe
 
             local row = new("Frame", { BackgroundColor3 = expanded and C.panel2 or C.panel,
-                Size = UDim2.new(1, 0, 0, expanded and 182 or 48), BorderSizePixel = 0,
+                Size = UDim2.new(1, 0, 0, expanded and (isRovibes and 182 or 140) or 48), BorderSizePixel = 0,
                 LayoutOrder = i, ClipsDescendants = true }, skList)
             round(row, 10); stroke(row, expanded and C.accent or C.line)
 
@@ -1195,7 +1262,7 @@ local function buildMenu()
             label(hdr, "@" .. p.Name, 10, C.accent, FONT, UDim2.new(0, 52, 0, 26), UDim2.new(nameW.X.Scale, nameW.X.Offset, 0, 14))
             if isMe then ownerTag(hdr, UDim2.new(1, -60, 0, 17)) end
 
-            if not isMe and not expanded then
+            if not isMe and not expanded and isRovibes then
                 -- atalhos rápidos
                 miniButton(hdr, "Usar", -150, 48, C.panel2).MouseButton1Click:Connect(function() useNick(p.Name) end)
                 miniButton(hdr, "Copiar", -98, 60, C.accentDim).MouseButton1Click:Connect(function()
@@ -1223,9 +1290,17 @@ local function buildMenu()
                 local tpBtn = fnBtn("TP até ele", 1, 0, C.accentDim)
                 ui.stickBtn = fnBtn("Grudar", 0, 1, C.accentDim)
                 ui.headBtn  = fnBtn("Sentar na cabeça", 1, 1, C.accentDim)
-                local useBtn2  = fnBtn("Usar nick", 0, 2, C.panel)
-                local copyBtn2 = fnBtn("Copiar avatar", 1, 2, C.panel)
-                stroke(useBtn2); stroke(copyBtn2)
+                if isRovibes then
+                    local useBtn2  = fnBtn("Usar nick", 0, 2, C.panel)
+                    local copyBtn2 = fnBtn("Copiar avatar", 1, 2, C.panel)
+                    stroke(useBtn2); stroke(copyBtn2)
+                    useBtn2.MouseButton1Click:Connect(function()
+                        useNick(p.Name); refreshDetail("Nick definido como alvo")
+                    end)
+                    copyBtn2.MouseButton1Click:Connect(function()
+                        useNick(p.Name); runNow(); refreshDetail("Copiando avatar...")
+                    end)
+                end
 
                 ui.spectBtn.MouseButton1Click:Connect(function()
                     if spectating == p then
@@ -1245,20 +1320,14 @@ local function buildMenu()
                 end)
                 ui.stickBtn.MouseButton1Click:Connect(function() startAttach(p, "stick") end)
                 ui.headBtn.MouseButton1Click:Connect(function() startAttach(p, "head") end)
-                useBtn2.MouseButton1Click:Connect(function()
-                    useNick(p.Name); refreshDetail("Nick definido como alvo")
-                end)
-                copyBtn2.MouseButton1Click:Connect(function()
-                    useNick(p.Name); runNow(); refreshDetail("Copiando avatar...")
-                end)
                 refreshDetail()
             end
         end
     end
 
     skFilter:GetPropertyChangedSignal("Text"):Connect(renderPlayers)
-    Players.PlayerAdded:Connect(function() task.defer(renderPlayers) end)
-    Players.PlayerRemoving:Connect(function() task.defer(renderPlayers) end)
+    on(Players.PlayerAdded, function() task.defer(renderPlayers) end)
+    on(Players.PlayerRemoving, function() task.defer(renderPlayers) end)
     renderPlayers()
 
     ------------------------------------------------------------
@@ -1277,16 +1346,28 @@ local function buildMenu()
         end
     end
 
-    for i, def in ipairs({ { "home", "Início" }, { "avatar", "Avatar" }, { "stalk", "Stalk" },
+    local navList = new("Frame", { BackgroundTransparency = 1, Position = UDim2.new(0, 8, 0, 32),
+        Size = UDim2.new(1, -16, 0, 200) }, side)
+    new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, navList)
+
+    for i, def in ipairs({ { "home", "Início" }, { "rovibes", CONFIG.GAME_TAB_NAME }, { "stalk", "Stalk" },
         { "movement", "Movement" }, { "config", "Configurações" } }) do
+        local isGame = (def[1] == "rovibes")
         local b = new("TextButton", { Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
-            BackgroundColor3 = C.accentDim, BorderSizePixel = 0, Size = UDim2.new(1, -16, 0, 34),
-            Position = UDim2.new(0, 8, 0, 32 + (i - 1) * 40) }, side)
+            BackgroundColor3 = C.accentDim, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 34),
+            LayoutOrder = i, Visible = not isGame }, navList)
         round(b, 9)
         local st = stroke(b, C.accent)
         st.Enabled = false
+        local textX = 14
+        if isGame then
+            textX = 38
+            table.insert(rovibesOnly, b)
+            round(new("ImageLabel", { Size = UDim2.new(0, 20, 0, 20), Position = UDim2.new(0, 10, 0.5, -10),
+                BackgroundColor3 = C.panel2, BorderSizePixel = 0, Image = gameIcon }, b), 5)
+        end
         navButtons[def[1]] = { btn = b, stroke = st,
-            lbl = label(b, def[2], 12, C.muted, FONTB, UDim2.new(0, 14, 0, 0), UDim2.new(1, -20, 1, 0)) }
+            lbl = label(b, def[2], 12, C.muted, FONTB, UDim2.new(0, textX, 0, 0), UDim2.new(1, -(textX + 6), 1, 0)) }
         b.MouseButton1Click:Connect(function()
             searchBox.Text = ""
             showPage(def[1])
@@ -1294,18 +1375,19 @@ local function buildMenu()
     end
 
     local features = {
-        { "Auto ao morrer",          "Executa sozinho quando você morre",  "avatar" },
-        { "Clique na tela",          "Clique de mouse para abrir o item",  "avatar" },
-        { "Ativar agora",            "Executa sem precisar morrer",        "avatar" },
-        { "Nickname alvo",           "Jogador a ser copiado",              "avatar" },
-        { "Verificar usuário",       "Confere se o nome existe",           "avatar" },
-        { "Nicks favoritos",         "Salvar e usar nicks rapidamente",    "avatar" },
+        { "Auto ao morrer",          "Executa sozinho quando você morre",  "rovibes" },
+        { "Clique na tela",          "Clique de mouse para abrir o item",  "rovibes" },
+        { "Ativar agora",            "Executa sem precisar morrer",        "rovibes" },
+        { "Nickname alvo",           "Jogador a ser copiado",              "rovibes" },
+        { "Verificar usuário",       "Confere se o nome existe",           "rovibes" },
+        { "Nicks favoritos",         "Salvar e usar nicks rapidamente",    "rovibes" },
         { "Nome do item",            "Tool que será equipado",             "config" },
         { "Texto do botão",          "Botão de confirmar",                 "config" },
         { "Tempo após equipar",      "Espera antes de ativar o item",      "config" },
         { "Tempo limite",            "Espera pela caixa de texto",         "config" },
         { "Intervalo de tentativas", "Tempo entre cliques",                "config" },
         { "Tecla do menu",           "Muda a tecla que abre o menu",       "config" },
+        { "Matar script",            "Desliga tudo e remove o menu",       "config" },
         { "Copiar servidor",         "Copia o JobId do servidor",          "home" },
         { "Servidores",              "Lista de servidores, ping e rejoin", "servers" },
         { "Rejoin",                  "Entrar de novo no servidor",         "servers" },
@@ -1326,7 +1408,8 @@ local function buildMenu()
 
         local found = 0
         for _, f in ipairs(features) do
-            if f[1]:lower():find(q, 1, true) or f[2]:lower():find(q, 1, true) then
+            if (f[3] ~= "rovibes" or isRovibes)
+                and (f[1]:lower():find(q, 1, true) or f[2]:lower():find(q, 1, true)) then
                 found += 1
                 local b = ordered(new("TextButton", { Text = "", AutoButtonColor = true, BackgroundColor3 = C.panel,
                     Size = UDim2.new(1, 0, 0, 46), BorderSizePixel = 0 }, res))
@@ -1367,7 +1450,7 @@ local function buildMenu()
     end
 
     local frames, last = 0, os.clock()
-    RunService.RenderStepped:Connect(function()
+    on(RunService.RenderStepped, function()
         frames += 1
         local t = os.clock()
         if t - last < 0.5 then return end
@@ -1386,7 +1469,7 @@ local function buildMenu()
     header.InputBegan:Connect(function(input)
         if isPointer(input) then dragging, dragStart, startPos = true, input.Position, main.Position end
     end)
-    UserInputService.InputChanged:Connect(function(input)
+    on(UserInputService.InputChanged, function(input)
         if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
             or input.UserInputType == Enum.UserInputType.Touch) then
             local d = input.Position - dragStart
@@ -1394,10 +1477,10 @@ local function buildMenu()
                 startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
     end)
-    UserInputService.InputEnded:Connect(function(input)
+    on(UserInputService.InputEnded, function(input)
         if isPointer(input) then dragging = false end
     end)
-    UserInputService.InputBegan:Connect(function(input, processed)
+    on(UserInputService.InputBegan, function(input, processed)
         if not processed and not capturingKey and input.KeyCode.Name == CONFIG.MENU_KEY then
             main.Visible = not main.Visible
         end
@@ -1405,6 +1488,20 @@ local function buildMenu()
 
     drips(main, 54, 5, 14, 5, 42) -- gotas por cima do conteúdo (não bloqueiam cliques)
     showPage("home")
+
+    -- mostra/esconde o que é exclusivo do Ro-vibes (roda de novo quando a detecção termina)
+    local function applyGame()
+        if not alive then return end
+        for _, o in ipairs(rovibesOnly) do o.Visible = isRovibes end
+        if gameInfo.ready then
+            local name = gameInfo.name or "Jogo atual"
+            gameName.Text, rvName.Text = name, name
+        end
+        renderPlayers()
+        if not isRovibes and currentPage == "rovibes" then showPage("home") end
+    end
+    onGameReady = applyGame
+    applyGame()
 end
 
 buildMenu()
