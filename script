@@ -10,7 +10,7 @@
       5. Escreve o nickname na caixa de texto do item
       6. Clica no botão "Copy"
 
-    OBS: eu não vejo os nomes internos da GUI do jogo, então o script
+    OBS: os nomes internos da GUI do jogo, então o script
     procura a TextBox e o botão pelo texto/tipo. Se o jogo usar nomes
     diferentes, ajuste a seção CONFIG.
 ]]
@@ -404,8 +404,8 @@ local function buildMenu()
     }, logo)
     label(header, "A", 13, C.text, FONTB, UDim2.new(0, 20, 0, 15), UDim2.new(0, 24, 0, 24), Enum.TextXAlignment.Center)
 
-    label(header, "AVATAR HUB", 16, C.text, FONTB, UDim2.new(0, 56, 0, 8), UDim2.new(0, 150, 0, 20))
-    label(header, "Seu espaço no jogo", 10, C.muted, FONT, UDim2.new(0, 56, 0, 29), UDim2.new(0, 150, 0, 14))
+    label(header, "KAOS", 16, C.text, FONTB, UDim2.new(0, 56, 0, 8), UDim2.new(0, 150, 0, 20))
+    label(header, "Acima de nois soh Deus", 10, C.muted, FONT, UDim2.new(0, 56, 0, 29), UDim2.new(0, 150, 0, 14))
 
     -- busca
     local searchBox = new("TextBox", {
