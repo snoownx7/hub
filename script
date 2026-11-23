@@ -1,0 +1,959 @@
+--[[
+    Auto Copy Avatar ao morrer
+    Roda no CLIENTE (LocalScript / executor).
+
+    Fluxo:
+      1. Detecta quando você morre
+      2. Espera o respawn
+      3. Puxa o item (Tool) especificado para a mão
+      4. Confirma que o nome de usuário existe no Roblox
+      5. Escreve o nickname na caixa de texto do item
+      6. Clica no botão "Copy"
+
+    OBS: eu não vejo os nomes internos da GUI do jogo, então o script
+    procura a TextBox e o botão pelo texto/tipo. Se o jogo usar nomes
+    diferentes, ajuste a seção CONFIG.
+]]
+
+----------------------------------------------------------------
+-- CONFIG
+----------------------------------------------------------------
+local CONFIG = {
+    TOOL_NAME   = "Controller", -- nome do item (Tool) na mochila
+    TARGET_NICK = "auv1u",      -- nickname a ser escrito
+    BUTTON_TEXT = "Copy",       -- texto do botão de confirmar
+    DELAY_AFTER_EQUIP = 0.6,    -- tempo p/ a GUI do item abrir
+    TIMEOUT = 8,                -- tempo máx. esperando o item/GUI
+    USE_SCREEN_CLICK = true,    -- faz clique de mouse na tela depois de equipar
+    RETRY_EVERY = 1.5,          -- de quanto em quanto tempo tenta "clicar" no item de novo
+}
+
+----------------------------------------------------------------
+-- SERVIÇOS
+----------------------------------------------------------------
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local player  = Players.LocalPlayer
+
+-- print/warn também mandam a mensagem para o menu (statusHook)
+local statusHook
+local _print, _warn = print, warn
+local function print(msg) _print(msg); if statusHook then statusHook(msg, false) end end
+local function warn(msg)  _warn(msg);  if statusHook then statusHook(msg, true)  end end
+
+-- Estado controlado pelo menu
+local autoEnabled = true   -- ligado/desligado: rodar automaticamente ao morrer
+local menuGui              -- referência do menu (preenchida lá embaixo)
+
+-- true se o objeto faz parte do meu próprio menu (pra não confundir com a GUI do jogo)
+local function isMine(obj)
+    return menuGui ~= nil and obj:IsDescendantOf(menuGui)
+end
+
+----------------------------------------------------------------
+-- FUNÇÕES AUXILIARES
+----------------------------------------------------------------
+
+-- Confirma se o nome de usuário existe no Roblox
+local function usernameExists(name)
+    local ok, userId = pcall(function()
+        return Players:GetUserIdFromNameAsync(name)
+    end)
+    return ok and userId ~= nil, userId
+end
+
+-- Espera o Tool aparecer na mochila (ou já estar na mão)
+local function waitForTool(name)
+    local deadline = os.clock() + CONFIG.TIMEOUT
+    while os.clock() < deadline do
+        local char = player.Character
+        local tool = (char and char:FindFirstChild(name))
+            or player.Backpack:FindFirstChild(name)
+        if tool and tool:IsA("Tool") then
+            return tool
+        end
+        task.wait(0.2)
+    end
+end
+
+-- Puxa o item para a mão
+local function equipTool(tool)
+    local char = player.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    if tool.Parent ~= char then
+        hum:EquipTool(tool)
+    end
+    return true
+end
+
+-- "Clica" com o item na mão (ativa o Tool) sem precisar clicar na tela
+local function activateTool(tool)
+    -- 1) método nativo: dispara o evento Tool.Activated localmente
+    pcall(function() tool:Activate() end)
+
+    -- 2) executor: dispara direto as conexões do evento Activated
+    if typeof(getconnections) == "function" then
+        pcall(function()
+            for _, c in ipairs(getconnections(tool.Activated)) do
+                pcall(function() c:Fire() end)
+            end
+        end)
+    end
+end
+
+-- Clique REAL de mouse no meio da tela (para jogos que ouvem o mouse/UserInputService
+-- em vez do evento Tool.Activated)
+local function clickScreen()
+    -- 1) executor: clique de mouse nativo
+    if typeof(mouse1click) == "function" then
+        pcall(mouse1click)
+    end
+
+    -- 2) clique virtual no centro da tela
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local cam = workspace.CurrentCamera
+        local vp  = cam and cam.ViewportSize or Vector2.new(800, 600)
+        local x, y = vp.X / 2, vp.Y / 2
+        vim:SendMouseMoveEvent(x, y, game)
+        vim:SendMouseButtonEvent(x, y, 0, true,  game, 1)
+        task.wait(0.05)
+        vim:SendMouseButtonEvent(x, y, 0, false, game, 1)
+    end)
+end
+
+-- Acha a caixa de texto visível na GUI do item
+local function findTextBox()
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return end
+    for _, d in ipairs(gui:GetDescendants()) do
+        if d:IsA("TextBox") and d.Visible and not isMine(d) then
+            -- só considera se todos os ancestrais estiverem visíveis
+            local visible, p = true, d.Parent
+            while p and p ~= gui do
+                if p:IsA("GuiObject") and not p.Visible then visible = false break end
+                if p:IsA("ScreenGui") and not p.Enabled then visible = false break end
+                p = p.Parent
+            end
+            if visible then return d end
+        end
+    end
+end
+
+-- Acha o botão pelo texto (o próprio botão ou um label dentro dele)
+local function findButton(text)
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return end
+    for _, d in ipairs(gui:GetDescendants()) do
+        if (d:IsA("TextButton") or d:IsA("TextLabel")) and d.Visible and not isMine(d) then
+            local t = d.Text:gsub("%s+", "")
+            if t:lower() == text:lower() then
+                local node = d
+                while node and node ~= gui do
+                    if node:IsA("GuiButton") then return node end
+                    node = node.Parent
+                end
+            end
+        end
+    end
+end
+
+-- Clica no botão (usa funções do executor quando existem)
+local function clickButton(btn)
+    if typeof(getconnections) == "function" then
+        for _, ev in ipairs({ "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }) do
+            for _, c in ipairs(getconnections(btn[ev])) do
+                pcall(function() c:Fire() end)
+            end
+        end
+    elseif typeof(firesignal) == "function" then
+        pcall(firesignal, btn.MouseButton1Click)
+        pcall(firesignal, btn.Activated)
+    else
+        -- fallback: clique simulado no centro do botão
+        local vim = game:GetService("VirtualInputManager")
+        local pos, size = btn.AbsolutePosition, btn.AbsoluteSize
+        local x, y = pos.X + size.X / 2, pos.Y + size.Y / 2 + 36 -- 36 = topbar
+        vim:SendMouseButtonEvent(x, y, 0, true,  game, 0)
+        vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    end
+end
+
+----------------------------------------------------------------
+-- AÇÃO PRINCIPAL (executada após cada morte)
+----------------------------------------------------------------
+local running = false
+
+local function doRoutine()
+    if running then return end
+    running = true
+
+    -- 1) confirma o nome de usuário
+    local exists, userId = usernameExists(CONFIG.TARGET_NICK)
+    if not exists then
+        warn(("[AutoCopy] Usuário '%s' NÃO existe."):format(CONFIG.TARGET_NICK))
+        running = false
+        return
+    end
+    print(("[AutoCopy] Usuário confirmado: %s (UserId %d)"):format(CONFIG.TARGET_NICK, userId))
+
+    -- 2) pega o item
+    local tool = waitForTool(CONFIG.TOOL_NAME)
+    if not tool then
+        warn("[AutoCopy] Item '" .. CONFIG.TOOL_NAME .. "' não encontrado.")
+        running = false
+        return
+    end
+    equipTool(tool)
+    task.wait(CONFIG.DELAY_AFTER_EQUIP)
+
+    -- 3) ativa o item (o "clique") e espera a caixa de texto aparecer.
+    --    Se a GUI não abrir, tenta ativar de novo a cada RETRY_EVERY segundos.
+    local box
+    local deadline = os.clock() + CONFIG.TIMEOUT
+    local lastActivate = 0
+    while not box and os.clock() < deadline do
+        if os.clock() - lastActivate >= CONFIG.RETRY_EVERY then
+            -- garante que o item continua na mão antes de ativar
+            if tool.Parent ~= player.Character then
+                equipTool(tool)
+                task.wait(0.2)
+            end
+            activateTool(tool)   -- evento Tool.Activated
+            if CONFIG.USE_SCREEN_CLICK then
+                clickScreen()    -- clique de mouse de verdade
+            end
+            lastActivate = os.clock()
+        end
+        task.wait(0.2)
+        box = findTextBox()
+    end
+    if not box then
+        warn("[AutoCopy] Caixa de texto não encontrada.")
+        running = false
+        return
+    end
+
+    -- 4) escreve o nickname
+    box:CaptureFocus()
+    box.Text = CONFIG.TARGET_NICK
+    task.wait(0.1)
+    box:ReleaseFocus()
+
+    -- 5) confirma que o texto ficou certo e clica em "Copy"
+    if box.Text == CONFIG.TARGET_NICK then
+        local btn = findButton(CONFIG.BUTTON_TEXT)
+        if btn then
+            clickButton(btn)
+            print("[AutoCopy] Avatar copiado de " .. CONFIG.TARGET_NICK)
+        else
+            warn("[AutoCopy] Botão '" .. CONFIG.BUTTON_TEXT .. "' não encontrado.")
+        end
+    else
+        warn("[AutoCopy] O texto não foi preenchido corretamente.")
+    end
+
+    running = false
+end
+
+----------------------------------------------------------------
+-- DETECTA A MORTE
+----------------------------------------------------------------
+local function onCharacter(char)
+    local hum = char:WaitForChild("Humanoid", 10)
+    if not hum then return end
+
+    hum.Died:Connect(function()
+        if not autoEnabled then return end -- menu desligado: ignora a morte
+        print("[AutoCopy] Você morreu. Aguardando respawn...")
+        -- espera o novo personagem e roda a rotina
+        local newChar = player.CharacterAdded:Wait()
+        newChar:WaitForChild("Humanoid", 10)
+        task.wait(1)
+        if autoEnabled then -- confere de novo (pode ter desligado enquanto esperava)
+            doRoutine()
+        end
+    end)
+end
+
+if player.Character then
+    onCharacter(player.Character)
+end
+player.CharacterAdded:Connect(onCharacter)
+
+----------------------------------------------------------------
+-- MENU (estilo hub: sidebar + cards + favoritos)
+----------------------------------------------------------------
+local RunService         = game:GetService("RunService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local Stats              = game:GetService("Stats")
+
+local C = {
+    bg        = Color3.fromRGB(8, 6, 14),
+    side      = Color3.fromRGB(11, 9, 20),
+    panel     = Color3.fromRGB(18, 15, 32),
+    panel2    = Color3.fromRGB(30, 23, 54),
+    line      = Color3.fromRGB(50, 38, 88),
+    accent    = Color3.fromRGB(139, 92, 246),
+    accentDim = Color3.fromRGB(72, 44, 128),
+    text      = Color3.fromRGB(245, 243, 255),
+    muted     = Color3.fromRGB(150, 140, 178),
+    ok        = Color3.fromRGB(110, 231, 183),
+    bad       = Color3.fromRGB(248, 113, 113),
+}
+local FONT  = Enum.Font.GothamMedium
+local FONTB = Enum.Font.GothamBold
+
+-- ---------- helpers de UI ----------
+local function new(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
+end
+
+local function round(o, r)
+    return new("UICorner", { CornerRadius = UDim.new(0, r or 10) }, o)
+end
+
+local function stroke(o, col, th)
+    return new("UIStroke", {
+        Color = col or C.line, Thickness = th or 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, o)
+end
+
+local function label(parent, text, size, color, font, pos, sz, align)
+    return new("TextLabel", {
+        BackgroundTransparency = 1,
+        Text = text, TextSize = size,
+        TextColor3 = color or C.text,
+        Font = font or FONT,
+        Position = pos or UDim2.new(),
+        Size = sz or UDim2.new(1, 0, 0, size + 4),
+        TextXAlignment = align or Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    }, parent)
+end
+
+local layoutN = 0
+local function ordered(o)
+    layoutN += 1
+    o.LayoutOrder = layoutN
+    return o
+end
+
+local function buildMenu()
+    -- ---------- onde colocar a GUI ----------
+    local parent
+    if typeof(gethui) == "function" then
+        parent = gethui()
+    else
+        local ok, core = pcall(function() return game:GetService("CoreGui") end)
+        parent = ok and core or player:WaitForChild("PlayerGui")
+    end
+    local old = parent:FindFirstChild("AvatarHubMenu")
+    if old then old:Destroy() end
+
+    local gui = new("ScreenGui", {
+        Name = "AvatarHubMenu",
+        ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        DisplayOrder = 999,
+    })
+    if not pcall(function() gui.Parent = parent end) then
+        gui.Parent = player:WaitForChild("PlayerGui")
+    end
+    menuGui = gui
+
+    -- ---------- estado compartilhado da UI ----------
+    local refreshers, logLabels = {}, {}
+    local function refreshAll() for _, f in ipairs(refreshers) do f() end end
+    local nickBox, runNow
+
+    -- ---------- janela ----------
+    local W, H = 680, 430
+    local main = new("Frame", {
+        Size = UDim2.new(0, W, 0, H),
+        Position = UDim2.new(0.5, -W / 2, 0.5, -H / 2),
+        BackgroundColor3 = C.bg,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        Active = true,
+    }, gui)
+    round(main, 14)
+    stroke(main, C.line)
+
+    -- ================= HEADER =================
+    local header = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 54), BackgroundColor3 = C.bg, BorderSizePixel = 0,
+    }, main)
+    new("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1),
+        BackgroundColor3 = C.line, BorderSizePixel = 0 }, header)
+
+    -- logo (losango)
+    local logo = new("Frame", {
+        Size = UDim2.new(0, 24, 0, 24), Position = UDim2.new(0, 20, 0, 15),
+        BackgroundColor3 = C.accent, Rotation = 45, BorderSizePixel = 0,
+    }, header)
+    round(logo, 6)
+    new("UIGradient", {
+        Color = ColorSequence.new(Color3.fromRGB(167, 120, 255), Color3.fromRGB(100, 50, 210)),
+        Rotation = 90,
+    }, logo)
+    label(header, "A", 13, C.text, FONTB, UDim2.new(0, 20, 0, 15), UDim2.new(0, 24, 0, 24), Enum.TextXAlignment.Center)
+
+    label(header, "AVATAR HUB", 16, C.text, FONTB, UDim2.new(0, 56, 0, 8), UDim2.new(0, 150, 0, 20))
+    label(header, "Seu espaço no jogo", 10, C.muted, FONT, UDim2.new(0, 56, 0, 29), UDim2.new(0, 150, 0, 14))
+
+    -- busca
+    local searchBox = new("TextBox", {
+        Size = UDim2.new(0, 250, 0, 32), Position = UDim2.new(0, 214, 0, 11),
+        BackgroundColor3 = C.panel, Text = "", PlaceholderText = "Buscar funções e ajustes",
+        TextColor3 = C.text, PlaceholderColor3 = C.muted,
+        Font = FONT, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        ClearTextOnFocus = false, BorderSizePixel = 0,
+    }, header)
+    round(searchBox, 10)
+    stroke(searchBox, C.line)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, searchBox)
+
+    -- status
+    local dot = new("Frame", { Size = UDim2.new(0, 6, 0, 6), Position = UDim2.new(0, 484, 0, 24),
+        BackgroundColor3 = C.ok, BorderSizePixel = 0 }, header)
+    round(dot, 3)
+    label(header, "Conectado", 10, C.ok, FONTB, UDim2.new(0, 496, 0, 18), UDim2.new(0, 70, 0, 18))
+
+    local function headerBtn(text, x)
+        local b = new("TextButton", {
+            Size = UDim2.new(0, 30, 0, 30), Position = UDim2.new(1, x, 0, 12),
+            BackgroundColor3 = C.panel, Text = text, TextColor3 = C.text,
+            Font = FONTB, TextSize = 14, AutoButtonColor = true, BorderSizePixel = 0,
+        }, header)
+        round(b, 8)
+        stroke(b, C.line)
+        return b
+    end
+    local minBtn   = headerBtn("-", -74)
+    local closeBtn = headerBtn("X", -38)
+
+    -- ================= BARRA DE STATUS =================
+    local statusBar = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 24), Position = UDim2.new(0, 0, 1, -24),
+        BackgroundColor3 = C.bg, BorderSizePixel = 0,
+    }, main)
+    new("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = C.line, BorderSizePixel = 0 }, statusBar)
+    local statusLeft = label(statusBar, "Pronto", 10, C.muted, FONT, UDim2.new(0, 14, 0, 5), UDim2.new(1, -200, 0, 14))
+    local statusRight = label(statusBar, "FPS --   -- ms", 10, C.ok, FONTB, UDim2.new(1, -170, 0, 5),
+        UDim2.new(0, 156, 0, 14), Enum.TextXAlignment.Right)
+    table.insert(logLabels, statusLeft)
+
+    -- ================= SIDEBAR =================
+    local side = new("Frame", {
+        Size = UDim2.new(0, 150, 1, -78), Position = UDim2.new(0, 0, 0, 54),
+        BackgroundColor3 = C.side, BorderSizePixel = 0,
+    }, main)
+    new("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(1, -1, 0, 0),
+        BackgroundColor3 = C.line, BorderSizePixel = 0 }, side)
+    label(side, "NAVEGAÇÃO", 9, C.muted, FONTB, UDim2.new(0, 16, 0, 14), UDim2.new(1, -32, 0, 12))
+
+    -- perfil
+    local prof = new("Frame", {
+        Size = UDim2.new(1, -16, 0, 46), Position = UDim2.new(0, 8, 1, -54),
+        BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    }, side)
+    round(prof, 10)
+    stroke(prof, C.line)
+    local avatarImg = new("ImageLabel", {
+        Size = UDim2.new(0, 30, 0, 30), Position = UDim2.new(0, 8, 0, 8),
+        BackgroundColor3 = C.panel2, BorderSizePixel = 0, Image = "",
+    }, prof)
+    round(avatarImg, 15)
+    label(prof, player.DisplayName, 11, C.text, FONTB, UDim2.new(0, 46, 0, 8), UDim2.new(1, -52, 0, 14))
+    label(prof, "@" .. player.Name, 9, C.accent, FONT, UDim2.new(0, 46, 0, 24), UDim2.new(1, -52, 0, 12))
+    task.spawn(function()
+        local ok, img = pcall(function()
+            return Players:GetUserThumbnailAsync(player.UserId,
+                Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+        end)
+        if ok then avatarImg.Image = img end
+    end)
+
+    -- ================= PÁGINAS =================
+    local pagesHolder = new("Frame", {
+        Size = UDim2.new(1, -150, 1, -78), Position = UDim2.new(0, 150, 0, 54),
+        BackgroundTransparency = 1, ClipsDescendants = true,
+    }, main)
+
+    local pages, navButtons = {}, {}
+    local currentPage = "home"
+
+    local function newPage(key)
+        local sf = new("ScrollingFrame", {
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            Size = UDim2.new(1, 0, 1, 0), CanvasSize = UDim2.new(),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent,
+            Visible = false,
+        }, pagesHolder)
+        new("UIPadding", {
+            PaddingTop = UDim.new(0, 16), PaddingBottom = UDim.new(0, 16),
+            PaddingLeft = UDim.new(0, 16), PaddingRight = UDim.new(0, 16),
+        }, sf)
+        new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder }, sf)
+        pages[key] = sf
+        return sf
+    end
+
+    local function pageTitle(sf, title, sub)
+        local f = ordered(new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40) }, sf))
+        label(f, title, 20, C.text, FONTB, UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 24))
+        label(f, sub, 10, C.muted, FONT, UDim2.new(0, 0, 0, 26), UDim2.new(1, 0, 0, 12))
+    end
+
+    local function panel(parent, h)
+        local p = ordered(new("Frame", {
+            Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = C.panel, BorderSizePixel = 0,
+        }, parent))
+        round(p, 12)
+        stroke(p, C.line)
+        return p
+    end
+
+    local function grid(parent, cols, h)
+        local f = ordered(new("Frame", {
+            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+        }, parent))
+        new("UIGridLayout", {
+            CellSize = UDim2.new(1 / cols, -(10 * (cols - 1)) / cols, 0, h),
+            CellPadding = UDim2.new(0, 10, 0, 10),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, f)
+        return f
+    end
+
+    local function toggleTile(parent, title, get, set)
+        local b = ordered(new("TextButton", {
+            Text = "", AutoButtonColor = false, BackgroundColor3 = C.panel,
+            Size = UDim2.new(1, 0, 0, 56), BorderSizePixel = 0,
+        }, parent))
+        round(b, 10)
+        local st = stroke(b, C.line)
+        label(b, title, 12, C.text, FONTB, UDim2.new(0, 14, 0, 12), UDim2.new(1, -28, 0, 16))
+        local sub = label(b, "", 10, C.muted, FONT, UDim2.new(0, 14, 0, 32), UDim2.new(1, -28, 0, 14))
+        local function refresh()
+            local on = get()
+            sub.Text = on and "Ativado" or "Desativado"
+            sub.TextColor3 = on and C.ok or C.muted
+            st.Color = on and C.accent or C.line
+            b.BackgroundColor3 = on and C.panel2 or C.panel
+        end
+        b.MouseButton1Click:Connect(function() set(not get()); refreshAll() end)
+        table.insert(refreshers, refresh)
+        refresh()
+        return b
+    end
+
+    local function actionTile(parent, title, subText, fn)
+        local b = ordered(new("TextButton", {
+            Text = "", AutoButtonColor = true, BackgroundColor3 = C.panel,
+            Size = UDim2.new(1, 0, 0, 56), BorderSizePixel = 0,
+        }, parent))
+        round(b, 10)
+        stroke(b, C.line)
+        label(b, title, 12, C.text, FONTB, UDim2.new(0, 14, 0, 12), UDim2.new(1, -28, 0, 16))
+        label(b, subText, 10, C.accent, FONT, UDim2.new(0, 14, 0, 32), UDim2.new(1, -28, 0, 14))
+        b.MouseButton1Click:Connect(fn)
+        return b
+    end
+
+    local function primaryButton(parent, text, fn)
+        local b = ordered(new("TextButton", {
+            Text = text, TextColor3 = C.text, Font = FONTB, TextSize = 13,
+            BackgroundColor3 = C.accent, Size = UDim2.new(1, 0, 0, 38),
+            AutoButtonColor = true, BorderSizePixel = 0,
+        }, parent))
+        round(b, 10)
+        new("UIGradient", {
+            Color = ColorSequence.new(Color3.fromRGB(160, 110, 255), Color3.fromRGB(110, 60, 220)),
+            Rotation = 90,
+        }, b)
+        b.MouseButton1Click:Connect(fn)
+        return b
+    end
+
+    -- ======================================================
+    -- PÁGINA: INÍCIO
+    -- ======================================================
+    local home = newPage("home")
+    pageTitle(home, "Início", "Acesso rápido às suas funções.")
+
+    -- banner
+    local banner = panel(home, 120)
+    banner.ClipsDescendants = true
+    stroke(banner, C.accentDim)
+    new("UIGradient", {
+        Color = ColorSequence.new(Color3.fromRGB(34, 18, 70), Color3.fromRGB(12, 8, 26)),
+        Rotation = 20,
+    }, banner)
+    label(banner, "BEM-VINDO DE VOLTA", 9, C.accent, FONTB, UDim2.new(0, 20, 0, 16), UDim2.new(0, 200, 0, 12))
+    label(banner, "AVATAR HUB", 28, C.text, FONTB, UDim2.new(0, 20, 0, 30), UDim2.new(0, 260, 0, 32))
+    label(banner, "Copie avatares do seu jeito.", 12, C.muted, FONT, UDim2.new(0, 20, 0, 68), UDim2.new(0, 260, 0, 16))
+    new("Frame", { Size = UDim2.new(0, 34, 0, 2), Position = UDim2.new(0, 20, 0, 90),
+        BackgroundColor3 = C.accent, BorderSizePixel = 0 }, banner)
+    label(banner, player.DisplayName, 11, C.text, FONTB, UDim2.new(0, 20, 0, 96), UDim2.new(0, 200, 0, 14))
+    -- decoração
+    local d1 = new("Frame", { Size = UDim2.new(0, 120, 0, 120), Position = UDim2.new(1, -90, 0.5, -60),
+        BackgroundColor3 = C.accentDim, BackgroundTransparency = 0.6, Rotation = 45, BorderSizePixel = 0 }, banner)
+    round(d1, 18); stroke(d1, C.accent)
+    local d2 = new("Frame", { Size = UDim2.new(0, 84, 0, 84), Position = UDim2.new(1, -150, 0.5, -42),
+        BackgroundColor3 = C.accent, Rotation = 45, BorderSizePixel = 0 }, banner)
+    round(d2, 14)
+    new("UIGradient", {
+        Color = ColorSequence.new(Color3.fromRGB(170, 120, 255), Color3.fromRGB(100, 50, 210)),
+        Rotation = 90,
+    }, d2)
+    local d3 = new("Frame", { Size = UDim2.new(0, 12, 0, 12), Position = UDim2.new(1, -128, 0.5, -52),
+        BackgroundColor3 = C.text, Rotation = 45, BorderSizePixel = 0 }, banner)
+    round(d3, 3)
+
+    -- cards de navegação
+    local cards = grid(home, 2, 56)
+    local function navCard(title, sub, glyph, target)
+        local b = ordered(new("TextButton", {
+            Text = "", AutoButtonColor = true, BackgroundColor3 = C.panel,
+            Size = UDim2.new(1, 0, 0, 56), BorderSizePixel = 0,
+        }, cards))
+        round(b, 10); stroke(b, C.line)
+        local ic = new("Frame", { Size = UDim2.new(0, 34, 0, 34), Position = UDim2.new(0, 12, 0.5, -17),
+            BackgroundColor3 = C.panel2, BorderSizePixel = 0 }, b)
+        round(ic, 9)
+        label(ic, glyph, 11, C.accent, FONTB, UDim2.new(), UDim2.new(1, 0, 1, 0), Enum.TextXAlignment.Center)
+        label(b, title, 12, C.text, FONTB, UDim2.new(0, 58, 0, 12), UDim2.new(1, -90, 0, 16))
+        label(b, sub, 10, C.muted, FONT, UDim2.new(0, 58, 0, 31), UDim2.new(1, -90, 0, 14))
+        label(b, ">", 14, C.muted, FONTB, UDim2.new(1, -26, 0.5, -9), UDim2.new(0, 14, 0, 18), Enum.TextXAlignment.Center)
+        b.MouseButton1Click:Connect(function() _G.__AvatarHubGo(target) end)
+    end
+    navCard("Avatar", "Nick, cópia e testes", "AV", "avatar")
+    navCard("Configurações", "Item, botão e tempos", "CF", "config")
+
+    -- linha inferior: agora jogando + favoritos
+    local bottom = ordered(new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 176) }, home))
+
+    local now = new("Frame", { Size = UDim2.new(0.42, -5, 1, 0), BackgroundColor3 = C.panel, BorderSizePixel = 0 }, bottom)
+    round(now, 12); stroke(now, C.line)
+    label(now, "AGORA JOGANDO", 9, C.accent, FONTB, UDim2.new(0, 16, 0, 14), UDim2.new(1, -32, 0, 12))
+    local gameName = label(now, "Carregando...", 15, C.text, FONTB, UDim2.new(0, 16, 0, 34), UDim2.new(1, -32, 0, 20))
+    local playersLbl = label(now, "", 10, C.muted, FONT, UDim2.new(0, 16, 0, 58), UDim2.new(1, -32, 0, 14))
+    label(now, "Funções disponíveis neste jogo.", 10, C.muted, FONT, UDim2.new(0, 16, 0, 84), UDim2.new(1, -32, 0, 14))
+    local copySrv = new("TextButton", {
+        Text = "Copiar servidor", TextColor3 = C.text, Font = FONTB, TextSize = 11,
+        BackgroundColor3 = C.panel2, Size = UDim2.new(1, -32, 0, 30),
+        Position = UDim2.new(0, 16, 1, -44), AutoButtonColor = true, BorderSizePixel = 0,
+    }, now)
+    round(copySrv, 8); stroke(copySrv, C.line)
+    copySrv.MouseButton1Click:Connect(function()
+        if typeof(setclipboard) == "function" then
+            setclipboard(game.JobId ~= "" and game.JobId or tostring(game.PlaceId))
+            copySrv.Text = "Copiado!"
+        else
+            copySrv.Text = "Sem suporte no executor"
+        end
+        task.delay(1.5, function() copySrv.Text = "Copiar servidor" end)
+    end)
+    task.spawn(function()
+        local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+        gameName.Text = (ok and info and info.Name) or "Jogo atual"
+    end)
+    local function updatePlayers()
+        playersLbl.Text = ("%d / %d jogadores"):format(#Players:GetPlayers(), Players.MaxPlayers)
+    end
+    updatePlayers()
+    Players.PlayerAdded:Connect(updatePlayers)
+    Players.PlayerRemoving:Connect(function() task.defer(updatePlayers) end)
+
+    local favs = new("Frame", {
+        Size = UDim2.new(0.58, -5, 1, 0), Position = UDim2.new(0.42, 5, 0, 0),
+        BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    }, bottom)
+    round(favs, 12); stroke(favs, C.line)
+    label(favs, "Seus favoritos", 13, C.text, FONTB, UDim2.new(0, 16, 0, 12), UDim2.new(1, -32, 0, 16))
+    label(favs, "Ligue, desligue ou execute rapidamente", 9, C.muted, FONT, UDim2.new(0, 16, 0, 30), UDim2.new(1, -32, 0, 12))
+    local favGrid = new("Frame", {
+        BackgroundTransparency = 1, Position = UDim2.new(0, 12, 0, 50), Size = UDim2.new(1, -24, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+    }, favs)
+    new("UIGridLayout", {
+        CellSize = UDim2.new(0.5, -5, 0, 56), CellPadding = UDim2.new(0, 10, 0, 8),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+    }, favGrid)
+    toggleTile(favGrid, "Auto ao morrer", function() return autoEnabled end, function(v) autoEnabled = v end)
+    toggleTile(favGrid, "Clique na tela", function() return CONFIG.USE_SCREEN_CLICK end,
+        function(v) CONFIG.USE_SCREEN_CLICK = v end)
+    actionTile(favGrid, "Ativar agora", "Executar", function() runNow() end)
+
+    -- ======================================================
+    -- PÁGINA: AVATAR
+    -- ======================================================
+    local av = newPage("avatar")
+    pageTitle(av, "Avatar", "Escolha o jogador e execute a cópia.")
+
+    local nickPanel = panel(av, 118)
+    label(nickPanel, "Nickname alvo", 12, C.text, FONTB, UDim2.new(0, 16, 0, 12), UDim2.new(1, -32, 0, 16))
+    label(nickPanel, "Jogador cuja aparência será copiada", 10, C.muted, FONT, UDim2.new(0, 16, 0, 30), UDim2.new(1, -32, 0, 12))
+    nickBox = new("TextBox", {
+        Size = UDim2.new(1, -130, 0, 32), Position = UDim2.new(0, 16, 0, 52),
+        BackgroundColor3 = C.bg, Text = CONFIG.TARGET_NICK, PlaceholderText = "nickname",
+        TextColor3 = C.text, PlaceholderColor3 = C.muted, Font = FONT, TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, BorderSizePixel = 0,
+    }, nickPanel)
+    round(nickBox, 8); stroke(nickBox, C.line)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 10) }, nickBox)
+    local verifyBtn = new("TextButton", {
+        Text = "Verificar", TextColor3 = C.text, Font = FONTB, TextSize = 12,
+        BackgroundColor3 = C.panel2, Size = UDim2.new(0, 94, 0, 32),
+        Position = UDim2.new(1, -110, 0, 52), AutoButtonColor = true, BorderSizePixel = 0,
+    }, nickPanel)
+    round(verifyBtn, 8); stroke(verifyBtn, C.line)
+    local verifyLbl = label(nickPanel, "", 10, C.muted, FONT, UDim2.new(0, 16, 0, 92), UDim2.new(1, -32, 0, 14))
+
+    local function applyNick()
+        local t = nickBox.Text:gsub("%s+", "")
+        if t ~= "" then
+            CONFIG.TARGET_NICK = t
+            nickBox.Text = t
+        else
+            nickBox.Text = CONFIG.TARGET_NICK
+        end
+    end
+    nickBox.FocusLost:Connect(applyNick)
+
+    verifyBtn.MouseButton1Click:Connect(function()
+        applyNick()
+        verifyLbl.Text = "Verificando..."
+        verifyLbl.TextColor3 = C.muted
+        task.spawn(function()
+            local exists, userId = usernameExists(CONFIG.TARGET_NICK)
+            if exists then
+                verifyLbl.Text = ("Usuário encontrado (ID %d)"):format(userId)
+                verifyLbl.TextColor3 = C.ok
+            else
+                verifyLbl.Text = "Usuário não existe"
+                verifyLbl.TextColor3 = C.bad
+            end
+        end)
+    end)
+
+    local avGrid = grid(av, 2, 56)
+    toggleTile(avGrid, "Auto ao morrer", function() return autoEnabled end, function(v) autoEnabled = v end)
+    toggleTile(avGrid, "Clique na tela", function() return CONFIG.USE_SCREEN_CLICK end,
+        function(v) CONFIG.USE_SCREEN_CLICK = v end)
+
+    runNow = function()
+        applyNick()
+        task.spawn(doRoutine)
+    end
+    primaryButton(av, "Ativar agora", function() runNow() end)
+
+    local logPanel = panel(av, 62)
+    label(logPanel, "ÚLTIMA AÇÃO", 9, C.accent, FONTB, UDim2.new(0, 16, 0, 12), UDim2.new(1, -32, 0, 12))
+    local logLbl = label(logPanel, "Nada executado ainda.", 11, C.muted, FONT, UDim2.new(0, 16, 0, 30), UDim2.new(1, -32, 0, 16))
+    table.insert(logLabels, logLbl)
+
+    -- ======================================================
+    -- PÁGINA: CONFIGURAÇÕES
+    -- ======================================================
+    local cfg = newPage("config")
+    pageTitle(cfg, "Configurações", "Perfis e preferências do script.")
+
+    local function settingRow(title, desc, key, numeric)
+        local p = panel(cfg, 54)
+        label(p, title, 12, C.text, FONTB, UDim2.new(0, 16, 0, 10), UDim2.new(1, -190, 0, 16))
+        label(p, desc, 10, C.muted, FONT, UDim2.new(0, 16, 0, 29), UDim2.new(1, -190, 0, 14))
+        local tb = new("TextBox", {
+            Size = UDim2.new(0, 140, 0, 30), Position = UDim2.new(1, -156, 0.5, -15),
+            BackgroundColor3 = C.bg, Text = tostring(CONFIG[key]),
+            TextColor3 = C.text, Font = FONT, TextSize = 12, ClearTextOnFocus = false, BorderSizePixel = 0,
+        }, p)
+        round(tb, 8); stroke(tb, C.line)
+        tb.FocusLost:Connect(function()
+            if numeric then
+                local n = tonumber(tb.Text)
+                if n and n >= 0 then CONFIG[key] = n end
+            else
+                local t = tb.Text:gsub("^%s+", ""):gsub("%s+$", "")
+                if t ~= "" then CONFIG[key] = t end
+            end
+            tb.Text = tostring(CONFIG[key])
+        end)
+    end
+    settingRow("Nome do item", "Tool que será equipado", "TOOL_NAME", false)
+    settingRow("Texto do botão", "Botão de confirmar (ex: Copy)", "BUTTON_TEXT", false)
+    settingRow("Tempo após equipar", "Segundos até ativar o item", "DELAY_AFTER_EQUIP", true)
+    settingRow("Tempo limite", "Segundos esperando a caixa de texto", "TIMEOUT", true)
+    settingRow("Intervalo de tentativas", "Segundos entre cada clique", "RETRY_EVERY", true)
+
+    -- ======================================================
+    -- PÁGINA: RESULTADOS DA BUSCA
+    -- ======================================================
+    local res = newPage("results")
+
+    -- ---------- navegação ----------
+    local navDefs = {
+        { "home",   "Início" },
+        { "avatar", "Avatar" },
+        { "config", "Configurações" },
+    }
+    local function showPage(key)
+        for k, p in pairs(pages) do p.Visible = (k == key) end
+        if key ~= "results" then currentPage = key end
+        for k, nb in pairs(navButtons) do
+            local active = (k == key)
+            nb.btn.BackgroundTransparency = active and 0.35 or 1
+            nb.btn.BackgroundColor3 = C.accentDim
+            nb.stroke.Enabled = active
+            nb.lbl.TextColor3 = active and C.text or C.muted
+        end
+    end
+    _G.__AvatarHubGo = function(key) showPage(key) end
+
+    for i, def in ipairs(navDefs) do
+        local b = new("TextButton", {
+            Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
+            BackgroundColor3 = C.accentDim, BorderSizePixel = 0,
+            Size = UDim2.new(1, -16, 0, 34), Position = UDim2.new(0, 8, 0, 32 + (i - 1) * 40),
+        }, side)
+        round(b, 9)
+        local st = stroke(b, C.accent)
+        st.Enabled = false
+        local l = label(b, def[2], 12, C.muted, FONTB, UDim2.new(0, 14, 0, 0), UDim2.new(1, -20, 1, 0))
+        navButtons[def[1]] = { btn = b, stroke = st, lbl = l }
+        b.MouseButton1Click:Connect(function()
+            searchBox.Text = ""
+            showPage(def[1])
+        end)
+    end
+
+    -- ---------- busca ----------
+    local features = {
+        { "Auto ao morrer",         "Executa sozinho quando você morre",   "avatar" },
+        { "Clique na tela",         "Clique de mouse para abrir o item",   "avatar" },
+        { "Ativar agora",           "Executa sem precisar morrer",         "avatar" },
+        { "Nickname alvo",          "Jogador a ser copiado",               "avatar" },
+        { "Verificar usuário",      "Confere se o nome existe",            "avatar" },
+        { "Nome do item",           "Tool que será equipado",              "config" },
+        { "Texto do botão",         "Botão de confirmar",                  "config" },
+        { "Tempo após equipar",     "Espera antes de ativar o item",       "config" },
+        { "Tempo limite",           "Espera pela caixa de texto",          "config" },
+        { "Intervalo de tentativas","Tempo entre cliques",                 "config" },
+        { "Copiar servidor",        "Copia o JobId do servidor",           "home" },
+    }
+
+    local function rebuildResults(q)
+        for _, ch in ipairs(res:GetChildren()) do
+            if not (ch:IsA("UIPadding") or ch:IsA("UIListLayout")) then ch:Destroy() end
+        end
+        pageTitle(res, "Resultados", ('Busca por "%s"'):format(q))
+        local found = 0
+        for _, f in ipairs(features) do
+            if f[1]:lower():find(q, 1, true) or f[2]:lower():find(q, 1, true) then
+                found += 1
+                local b = ordered(new("TextButton", {
+                    Text = "", AutoButtonColor = true, BackgroundColor3 = C.panel,
+                    Size = UDim2.new(1, 0, 0, 46), BorderSizePixel = 0,
+                }, res))
+                round(b, 10); stroke(b, C.line)
+                label(b, f[1], 12, C.text, FONTB, UDim2.new(0, 14, 0, 8), UDim2.new(1, -100, 0, 16))
+                label(b, f[2], 10, C.muted, FONT, UDim2.new(0, 14, 0, 26), UDim2.new(1, -100, 0, 14))
+                label(b, "Abrir >", 10, C.accent, FONTB, UDim2.new(1, -70, 0.5, -7), UDim2.new(0, 56, 0, 14), Enum.TextXAlignment.Right)
+                b.MouseButton1Click:Connect(function()
+                    searchBox.Text = ""
+                    showPage(f[3])
+                end)
+            end
+        end
+        if found == 0 then
+            local e = ordered(new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30) }, res))
+            label(e, "Nenhuma função encontrada.", 11, C.muted, FONT, UDim2.new(), UDim2.new(1, 0, 0, 16))
+        end
+    end
+
+    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        local q = searchBox.Text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+        if q == "" then
+            showPage(currentPage)
+        else
+            rebuildResults(q)
+            showPage("results")
+        end
+    end)
+
+    -- ---------- status / log ----------
+    statusHook = function(msg, isWarn)
+        msg = tostring(msg):gsub("^%[AutoCopy%]%s*", "")
+        for _, l in ipairs(logLabels) do
+            l.Text = msg
+            l.TextColor3 = isWarn and C.bad or C.ok
+        end
+    end
+
+    -- FPS / ping
+    local frames, last = 0, os.clock()
+    RunService.RenderStepped:Connect(function()
+        frames += 1
+        local t = os.clock()
+        if t - last >= 0.5 then
+            local fps = math.floor(frames / (t - last) + 0.5)
+            frames, last = 0, t
+            local ping = "--"
+            pcall(function()
+                ping = tostring(math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue()))
+            end)
+            statusRight.Text = ("FPS %d   %s ms"):format(fps, ping)
+        end
+    end)
+
+    -- ---------- janela: minimizar / fechar / arrastar / atalho ----------
+    local minimized = false
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        main.Size = minimized and UDim2.new(0, W, 0, 54) or UDim2.new(0, W, 0, H)
+        minBtn.Text = minimized and "+" or "-"
+    end)
+    closeBtn.MouseButton1Click:Connect(function() main.Visible = false end)
+
+    local dragging, dragStart, startPos
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos = true, input.Position, main.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    UserInputService.InputBegan:Connect(function(input, processed)
+        if not processed and input.KeyCode == Enum.KeyCode.RightShift then
+            main.Visible = not main.Visible
+        end
+    end)
+
+    showPage("home")
+end
+
+buildMenu()
+
+print("[AutoCopy] Ativo. Nick alvo: " .. CONFIG.TARGET_NICK)
