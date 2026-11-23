@@ -39,6 +39,9 @@ local CONFIG = {
     HEADSIT_HEIGHT = 1.8,       -- altura acima da cabeça ao sentar
     SERVER_PAGES = 5,           -- quantas páginas (100 servidores cada) buscar
     OWNER_TAG = "OWNER",        -- texto da tag no seu perfil
+    MENU_OFFSET_X = 0,          -- posição do menu (salva ao arrastar)
+    MENU_OFFSET_Y = 0,
+    ANTI_AFK = false,           -- evita ser kickado por ficar parado (20 min)
 }
 
 ----------------------------------------------------------------
@@ -432,28 +435,81 @@ local function saveFavorites()
     end
 end
 
--- Configurações salvas (tecla do menu)
+-- Configurações salvas localmente (pasta workspace do executor)
 local SETTINGS_FILE = "AvatarHub_config.json"
+local SAVED_KEYS = {
+    "TOOL_NAME", "TARGET_NICK", "BUTTON_TEXT",
+    "DELAY_AFTER_EQUIP", "TIMEOUT", "RETRY_EVERY",
+    "USE_SCREEN_CLICK", "CLICK_TP", "CLICK_TP_CTRL", "TP_HEIGHT",
+    "MENU_KEY", "STICK_DISTANCE", "HEADSIT_HEIGHT",
+    "MENU_OFFSET_X", "MENU_OFFSET_Y", "ANTI_AFK",
+}
+local DEFAULTS = {} -- valores originais (antes de carregar o arquivo salvo)
+for _, k in ipairs(SAVED_KEYS) do DEFAULTS[k] = CONFIG[k] end
+local saveNotify    -- o menu define: mostra a hora da última gravação
+
+-- assinatura do estado atual (pra só gravar no disco quando algo mudou)
+local function settingsSignature()
+    local parts = { tostring(autoEnabled) }
+    for _, k in ipairs(SAVED_KEYS) do
+        table.insert(parts, k .. "=" .. tostring(CONFIG[k]))
+    end
+    return table.concat(parts, "|")
+end
 
 if typeof(isfile) == "function" and typeof(readfile) == "function" then
     pcall(function()
         if isfile(SETTINGS_FILE) then
             local data = HttpService:JSONDecode(readfile(SETTINGS_FILE))
-            if typeof(data) == "table" and typeof(data.MENU_KEY) == "string"
-                and Enum.KeyCode[data.MENU_KEY] then
-                CONFIG.MENU_KEY = data.MENU_KEY
+            if typeof(data) == "table" then
+                for _, k in ipairs(SAVED_KEYS) do
+                    local v = data[k]
+                    if v ~= nil and typeof(v) == typeof(CONFIG[k]) then
+                        if typeof(v) == "number" and v < 0 and not k:find("^MENU_OFFSET") then
+                            -- ignora número inválido
+                        elseif k == "MENU_KEY" and not Enum.KeyCode[v] then
+                            -- ignora tecla inexistente
+                        elseif typeof(v) == "string" and v:gsub("%s+", "") == "" then
+                            -- ignora texto vazio
+                        else
+                            CONFIG[k] = v
+                        end
+                    end
+                end
+                if typeof(data.AUTO_ENABLED) == "boolean" then
+                    autoEnabled = data.AUTO_ENABLED
+                end
             end
         end
     end)
 end
 
-local function saveSettings()
-    if typeof(writefile) == "function" then
-        pcall(function()
-            writefile(SETTINGS_FILE, HttpService:JSONEncode({ MENU_KEY = CONFIG.MENU_KEY }))
-        end)
+local lastSavedSignature = settingsSignature()
+
+local function saveSettings(force)
+    if typeof(writefile) ~= "function" then return false end
+    local sig = settingsSignature()
+    if sig == lastSavedSignature and not force then return true end
+    local data = { AUTO_ENABLED = autoEnabled }
+    for _, k in ipairs(SAVED_KEYS) do data[k] = CONFIG[k] end
+    local ok = pcall(function() writefile(SETTINGS_FILE, HttpService:JSONEncode(data)) end)
+    if ok then
+        lastSavedSignature = sig
+        if saveNotify then saveNotify(os.date("%H:%M:%S")) end
     end
+    return ok
 end
+
+-- salva sozinho (a cada 2s, só se algo mudou) e também quando você sai do jogo
+task.spawn(function()
+    while true do
+        task.wait(2)
+        saveSettings()
+    end
+end)
+Players.PlayerRemoving:Connect(function(p)
+    if p == player then saveSettings() end
+end)
 
 local function hasFavorite(name)
     for i, n in ipairs(favorites) do
@@ -494,6 +550,20 @@ UserInputService.InputBegan:Connect(function(input, processed)
     clickTeleport()
 end)
 
+----------------------------------------------------------------
+-- MOVEMENT: ANTI AFK
+-- O Roblox dispara Player.Idled após ~20 min parado; simulamos um clique
+-- (VirtualUser) para o jogo achar que você está ativo. Respeita o toggle.
+----------------------------------------------------------------
+player.Idled:Connect(function()
+    if not CONFIG.ANTI_AFK then return end
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
+end)
+
 local function buildMenu()
     -- ---------- onde colocar a GUI ----------
     local parent
@@ -526,7 +596,7 @@ local function buildMenu()
     local W, H = 680, 430
     local main = new("Frame", {
         Size = UDim2.new(0, W, 0, H),
-        Position = UDim2.new(0.5, -W / 2, 0.5, -H / 2),
+        Position = UDim2.new(0.5, -W / 2 + CONFIG.MENU_OFFSET_X, 0.5, -H / 2 + CONFIG.MENU_OFFSET_Y),
         BackgroundColor3 = C.bg,
         BorderSizePixel = 0,
         ClipsDescendants = true,
@@ -1136,6 +1206,54 @@ local function buildMenu()
         end)
     end)
 
+    -- salvamento local (pasta workspace do executor)
+    local savePanel = panel(cfg, 104)
+    label(savePanel, "Salvamento local", 12, C.text, FONTB, UDim2.new(0, 16, 0, 10), UDim2.new(1, -32, 0, 16))
+    label(savePanel, "Tudo é salvo sozinho em AvatarHub_config.json e AvatarHub_favoritos.json",
+        10, C.muted, FONT, UDim2.new(0, 16, 0, 28), UDim2.new(1, -32, 0, 14))
+    local saveStatus = label(savePanel, typeof(writefile) == "function"
+        and "Salvamento ativo" or "Executor sem writefile: nada será salvo",
+        10, typeof(writefile) == "function" and C.ok or C.bad,
+        UDim2.new(0, 16, 0, 46), UDim2.new(1, -32, 0, 14))
+    saveNotify = function(t)
+        saveStatus.Text = "Última gravação: " .. t
+        saveStatus.TextColor3 = C.ok
+    end
+
+    local saveNow = new("TextButton", {
+        Text = "Salvar agora", TextColor3 = C.text, Font = FONTB, TextSize = 12,
+        BackgroundColor3 = C.accentDim, Size = UDim2.new(0.5, -22, 0, 30),
+        Position = UDim2.new(0, 16, 1, -40), AutoButtonColor = true, BorderSizePixel = 0,
+    }, savePanel)
+    round(saveNow, 8); stroke(saveNow, C.accent)
+    saveNow.MouseButton1Click:Connect(function()
+        if not saveSettings(true) then
+            saveStatus.Text = "Não foi possível salvar (sem writefile?)"
+            saveStatus.TextColor3 = C.bad
+        end
+        saveFavorites()
+    end)
+
+    local resetBtn = new("TextButton", {
+        Text = "Apagar dados salvos", TextColor3 = C.text, Font = FONTB, TextSize = 12,
+        BackgroundColor3 = C.panel2, Size = UDim2.new(0.5, -22, 0, 30),
+        Position = UDim2.new(0.5, 6, 1, -40), AutoButtonColor = true, BorderSizePixel = 0,
+    }, savePanel)
+    round(resetBtn, 8); stroke(resetBtn, C.line)
+    resetBtn.MouseButton1Click:Connect(function()
+        if typeof(delfile) == "function" and typeof(isfile) == "function" then
+            pcall(function()
+                if isfile(SETTINGS_FILE) then delfile(SETTINGS_FILE) end
+                if isfile(FAV_FILE) then delfile(FAV_FILE) end
+            end)
+            saveStatus.Text = "Arquivos apagados. Reexecute o script para voltar ao padrão."
+            saveStatus.TextColor3 = C.warnc
+        else
+            saveStatus.Text = "Executor sem delfile: apague os arquivos manualmente"
+            saveStatus.TextColor3 = C.bad
+        end
+    end)
+
     -- ======================================================
     -- PÁGINA: MOVEMENT
     -- ======================================================
@@ -1147,6 +1265,8 @@ local function buildMenu()
         function(v) CONFIG.CLICK_TP = v end)
     toggleTile(mvGrid, "Exigir CTRL", function() return CONFIG.CLICK_TP_CTRL end,
         function(v) CONFIG.CLICK_TP_CTRL = v end)
+    toggleTile(mvGrid, "Anti AFK", function() return CONFIG.ANTI_AFK end,
+        function(v) CONFIG.ANTI_AFK = v end)
 
     settingRow("Altura do teleporte", "Metros acima do ponto clicado", "TP_HEIGHT", true, mv)
 
@@ -1678,6 +1798,7 @@ local function buildMenu()
         { "Stalk",                  "Lista de jogadores no servidor",      "stalk" },
         { "Click TP",               "Teleporta até onde você clicar",      "movement" },
         { "Exigir CTRL",            "Só teleporta com CTRL apertado",      "movement" },
+        { "Anti AFK",               "Evita ser kickado por ficar parado",  "movement" },
         { "Altura do teleporte",    "Metros acima do ponto clicado",       "movement" },
     }
 
@@ -1764,6 +1885,9 @@ local function buildMenu()
             local d = input.Position - dragStart
             main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
                 startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            -- guarda a posição (relativa ao centro da tela) para salvar
+            CONFIG.MENU_OFFSET_X = math.floor(main.Position.X.Offset + W / 2)
+            CONFIG.MENU_OFFSET_Y = math.floor(main.Position.Y.Offset + H / 2)
         end
     end)
     UserInputService.InputEnded:Connect(function(input)
