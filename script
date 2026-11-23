@@ -1,7 +1,4 @@
 --[[
-    Auto Copy Avatar ao morrer
-    Roda no CLIENTE (LocalScript / executor).
-
     Fluxo:
       1. Detecta quando você morre
       2. Espera o respawn
@@ -26,6 +23,10 @@ local CONFIG = {
     TIMEOUT = 8,                -- tempo máx. esperando o item/GUI
     USE_SCREEN_CLICK = true,    -- faz clique de mouse na tela depois de equipar
     RETRY_EVERY = 1.5,          -- de quanto em quanto tempo tenta "clicar" no item de novo
+    CLICK_TP = false,           -- Click TP ligado/desligado
+    CLICK_TP_CTRL = true,       -- exigir CTRL apertado para teleportar
+    TP_HEIGHT = 3,              -- altura acima do ponto clicado
+    MENU_KEY = "RightShift",    -- tecla que mostra/esconde o menu
 }
 
 ----------------------------------------------------------------
@@ -344,6 +345,94 @@ local function ordered(o)
     return o
 end
 
+----------------------------------------------------------------
+-- NICKS FAVORITOS (salvos em arquivo, se o executor tiver writefile)
+----------------------------------------------------------------
+local HttpService = game:GetService("HttpService")
+local FAV_FILE = "AvatarHub_favoritos.json"
+local favorites = {}
+
+if typeof(isfile) == "function" and typeof(readfile) == "function" then
+    pcall(function()
+        if isfile(FAV_FILE) then
+            local data = HttpService:JSONDecode(readfile(FAV_FILE))
+            if typeof(data) == "table" then
+                for _, n in ipairs(data) do
+                    if typeof(n) == "string" then table.insert(favorites, n) end
+                end
+            end
+        end
+    end)
+end
+
+local function saveFavorites()
+    if typeof(writefile) == "function" then
+        pcall(function() writefile(FAV_FILE, HttpService:JSONEncode(favorites)) end)
+    end
+end
+
+-- Configurações salvas (tecla do menu)
+local SETTINGS_FILE = "AvatarHub_config.json"
+
+if typeof(isfile) == "function" and typeof(readfile) == "function" then
+    pcall(function()
+        if isfile(SETTINGS_FILE) then
+            local data = HttpService:JSONDecode(readfile(SETTINGS_FILE))
+            if typeof(data) == "table" and typeof(data.MENU_KEY) == "string"
+                and Enum.KeyCode[data.MENU_KEY] then
+                CONFIG.MENU_KEY = data.MENU_KEY
+            end
+        end
+    end)
+end
+
+local function saveSettings()
+    if typeof(writefile) == "function" then
+        pcall(function()
+            writefile(SETTINGS_FILE, HttpService:JSONEncode({ MENU_KEY = CONFIG.MENU_KEY }))
+        end)
+    end
+end
+
+local function hasFavorite(name)
+    for i, n in ipairs(favorites) do
+        if n:lower() == name:lower() then return i end
+    end
+end
+
+----------------------------------------------------------------
+-- MOVEMENT: CLICK TP
+----------------------------------------------------------------
+local function clickTeleport()
+    local char = player.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    local cam  = workspace.CurrentCamera
+    if not (hrp and cam) then return end
+
+    local loc = UserInputService:GetMouseLocation()
+    local ray = cam:ViewportPointToRay(loc.X, loc.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { char }
+
+    local hit = workspace:Raycast(ray.Origin, ray.Direction * 2000, params)
+    if hit then
+        local rotation = hrp.CFrame - hrp.CFrame.Position -- mantém para onde você olha
+        hrp.CFrame = CFrame.new(hit.Position + Vector3.new(0, CONFIG.TP_HEIGHT, 0)) * rotation
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed or not CONFIG.CLICK_TP then return end -- processed = clicou em GUI
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+    if CONFIG.CLICK_TP_CTRL
+        and not (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+              or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
+        return
+    end
+    clickTeleport()
+end)
+
 local function buildMenu()
     -- ---------- onde colocar a GUI ----------
     local parent
@@ -404,8 +493,8 @@ local function buildMenu()
     }, logo)
     label(header, "A", 13, C.text, FONTB, UDim2.new(0, 20, 0, 15), UDim2.new(0, 24, 0, 24), Enum.TextXAlignment.Center)
 
-    label(header, "KAOS", 16, C.text, FONTB, UDim2.new(0, 56, 0, 8), UDim2.new(0, 150, 0, 20))
-    label(header, "Acima de nois soh Deus", 10, C.muted, FONT, UDim2.new(0, 56, 0, 29), UDim2.new(0, 150, 0, 14))
+    label(header, "AVATAR HUB", 16, C.text, FONTB, UDim2.new(0, 56, 0, 8), UDim2.new(0, 150, 0, 20))
+    label(header, "Seu espaço no jogo", 10, C.muted, FONT, UDim2.new(0, 56, 0, 29), UDim2.new(0, 150, 0, 14))
 
     -- busca
     local searchBox = new("TextBox", {
@@ -637,6 +726,7 @@ local function buildMenu()
         b.MouseButton1Click:Connect(function() _G.__AvatarHubGo(target) end)
     end
     navCard("Avatar", "Nick, cópia e testes", "AV", "avatar")
+    navCard("Movement", "Click TP e movimento", "MV", "movement")
     navCard("Configurações", "Item, botão e tempos", "CF", "config")
 
     -- linha inferior: agora jogando + favoritos
@@ -692,6 +782,8 @@ local function buildMenu()
     toggleTile(favGrid, "Auto ao morrer", function() return autoEnabled end, function(v) autoEnabled = v end)
     toggleTile(favGrid, "Clique na tela", function() return CONFIG.USE_SCREEN_CLICK end,
         function(v) CONFIG.USE_SCREEN_CLICK = v end)
+    toggleTile(favGrid, "Click TP", function() return CONFIG.CLICK_TP end,
+        function(v) CONFIG.CLICK_TP = v end)
     actionTile(favGrid, "Ativar agora", "Executar", function() runNow() end)
 
     -- ======================================================
@@ -704,7 +796,7 @@ local function buildMenu()
     label(nickPanel, "Nickname alvo", 12, C.text, FONTB, UDim2.new(0, 16, 0, 12), UDim2.new(1, -32, 0, 16))
     label(nickPanel, "Jogador cuja aparência será copiada", 10, C.muted, FONT, UDim2.new(0, 16, 0, 30), UDim2.new(1, -32, 0, 12))
     nickBox = new("TextBox", {
-        Size = UDim2.new(1, -130, 0, 32), Position = UDim2.new(0, 16, 0, 52),
+        Size = UDim2.new(1, -240, 0, 32), Position = UDim2.new(0, 16, 0, 52),
         BackgroundColor3 = C.bg, Text = CONFIG.TARGET_NICK, PlaceholderText = "nickname",
         TextColor3 = C.text, PlaceholderColor3 = C.muted, Font = FONT, TextSize = 13,
         TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, BorderSizePixel = 0,
@@ -717,6 +809,12 @@ local function buildMenu()
         Position = UDim2.new(1, -110, 0, 52), AutoButtonColor = true, BorderSizePixel = 0,
     }, nickPanel)
     round(verifyBtn, 8); stroke(verifyBtn, C.line)
+    local favBtn = new("TextButton", {
+        Text = "+ Favorito", TextColor3 = C.text, Font = FONTB, TextSize = 12,
+        BackgroundColor3 = C.accentDim, Size = UDim2.new(0, 100, 0, 32),
+        Position = UDim2.new(1, -216, 0, 52), AutoButtonColor = true, BorderSizePixel = 0,
+    }, nickPanel)
+    round(favBtn, 8); stroke(favBtn, C.accent)
     local verifyLbl = label(nickPanel, "", 10, C.muted, FONT, UDim2.new(0, 16, 0, 92), UDim2.new(1, -32, 0, 14))
 
     local function applyNick()
@@ -757,6 +855,112 @@ local function buildMenu()
     end
     primaryButton(av, "Ativar agora", function() runNow() end)
 
+    -- ---------- nicks favoritos ----------
+    local favPanel = ordered(new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    }, av))
+    round(favPanel, 12); stroke(favPanel, C.line)
+    new("UIPadding", {
+        PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12),
+        PaddingLeft = UDim.new(0, 16), PaddingRight = UDim.new(0, 16),
+    }, favPanel)
+    new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, favPanel)
+
+    local favHead = ordered(new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 32) }, favPanel))
+    label(favHead, "Nicks favoritos", 12, C.text, FONTB, UDim2.new(), UDim2.new(1, 0, 0, 16))
+    label(favHead, "Salve nicks para usar com um clique", 10, C.muted, FONT, UDim2.new(0, 0, 0, 18), UDim2.new(1, 0, 0, 12))
+
+    local favRows = {}
+    local renderFavs
+
+    local function useNick(name)
+        CONFIG.TARGET_NICK = name
+        nickBox.Text = name
+    end
+
+    local function miniButton(parent, text, x, w, color)
+        local b = new("TextButton", {
+            Text = text, TextColor3 = C.text, Font = FONTB, TextSize = 11,
+            BackgroundColor3 = color, Size = UDim2.new(0, w, 0, 24),
+            Position = UDim2.new(1, x, 0.5, -12), AutoButtonColor = true, BorderSizePixel = 0,
+        }, parent)
+        round(b, 6)
+        return b
+    end
+
+    renderFavs = function()
+        for _, r in ipairs(favRows) do r:Destroy() end
+        favRows = {}
+
+        if #favorites == 0 then
+            local e = ordered(label(favPanel, "Nenhum nick salvo ainda.", 10, C.muted, FONT,
+                UDim2.new(), UDim2.new(1, 0, 0, 16)))
+            table.insert(favRows, e)
+            return
+        end
+
+        for _, name in ipairs(favorites) do
+            local row = ordered(new("Frame", {
+                BackgroundColor3 = C.bg, Size = UDim2.new(1, 0, 0, 34), BorderSizePixel = 0,
+            }, favPanel))
+            round(row, 8); stroke(row, C.line)
+            table.insert(favRows, row)
+
+            local nameBtn = new("TextButton", {
+                BackgroundTransparency = 1, Text = name, TextColor3 = C.text, Font = FONTB, TextSize = 12,
+                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+                Size = UDim2.new(1, -160, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+            }, row)
+            nameBtn.MouseButton1Click:Connect(function() useNick(name) end)
+
+            local useBtn  = miniButton(row, -146, 48, C.panel2)
+            useBtn.Text = "Usar"
+            local copyBtn = miniButton(row, -94, 60, C.accentDim)
+            copyBtn.Text = "Copiar"
+            local delBtn  = miniButton(row, -30, 22, C.bad)
+            delBtn.Text = "X"
+
+            useBtn.MouseButton1Click:Connect(function() useNick(name) end)
+            copyBtn.MouseButton1Click:Connect(function()
+                useNick(name)
+                runNow()
+            end)
+            delBtn.MouseButton1Click:Connect(function()
+                local idx = hasFavorite(name)
+                if idx then table.remove(favorites, idx) end
+                saveFavorites()
+                renderFavs()
+            end)
+        end
+    end
+    renderFavs()
+
+    favBtn.MouseButton1Click:Connect(function()
+        applyNick()
+        local name = CONFIG.TARGET_NICK
+        if hasFavorite(name) then
+            verifyLbl.Text = "Esse nick já está nos favoritos"
+            verifyLbl.TextColor3 = C.muted
+            return
+        end
+        verifyLbl.Text = "Verificando..."
+        verifyLbl.TextColor3 = C.muted
+        task.spawn(function()
+            local exists = usernameExists(name)
+            if exists then
+                table.insert(favorites, name)
+                saveFavorites()
+                renderFavs()
+                verifyLbl.Text = "Salvo nos favoritos"
+                verifyLbl.TextColor3 = C.ok
+            else
+                verifyLbl.Text = "Usuário não existe"
+                verifyLbl.TextColor3 = C.bad
+            end
+        end)
+    end)
+
     local logPanel = panel(av, 62)
     label(logPanel, "ÚLTIMA AÇÃO", 9, C.accent, FONTB, UDim2.new(0, 16, 0, 12), UDim2.new(1, -32, 0, 12))
     local logLbl = label(logPanel, "Nada executado ainda.", 11, C.muted, FONT, UDim2.new(0, 16, 0, 30), UDim2.new(1, -32, 0, 16))
@@ -768,8 +972,8 @@ local function buildMenu()
     local cfg = newPage("config")
     pageTitle(cfg, "Configurações", "Perfis e preferências do script.")
 
-    local function settingRow(title, desc, key, numeric)
-        local p = panel(cfg, 54)
+    local function settingRow(title, desc, key, numeric, page)
+        local p = panel(page or cfg, 54)
         label(p, title, 12, C.text, FONTB, UDim2.new(0, 16, 0, 10), UDim2.new(1, -190, 0, 16))
         label(p, desc, 10, C.muted, FONT, UDim2.new(0, 16, 0, 29), UDim2.new(1, -190, 0, 14))
         local tb = new("TextBox", {
@@ -795,15 +999,66 @@ local function buildMenu()
     settingRow("Tempo limite", "Segundos esperando a caixa de texto", "TIMEOUT", true)
     settingRow("Intervalo de tentativas", "Segundos entre cada clique", "RETRY_EVERY", true)
 
+    -- tecla que abre/fecha o menu
+    local capturingKey = false
+    local keyRow = panel(cfg, 54)
+    label(keyRow, "Tecla do menu", 12, C.text, FONTB, UDim2.new(0, 16, 0, 10), UDim2.new(1, -190, 0, 16))
+    label(keyRow, "Clique e aperte a nova tecla (Esc cancela)", 10, C.muted, FONT,
+        UDim2.new(0, 16, 0, 29), UDim2.new(1, -190, 0, 14))
+    local keyBtn = new("TextButton", {
+        Size = UDim2.new(0, 140, 0, 30), Position = UDim2.new(1, -156, 0.5, -15),
+        BackgroundColor3 = C.accentDim, Text = CONFIG.MENU_KEY, TextColor3 = C.text,
+        Font = FONTB, TextSize = 12, AutoButtonColor = true, BorderSizePixel = 0,
+    }, keyRow)
+    round(keyBtn, 8); stroke(keyBtn, C.accent)
+    keyBtn.MouseButton1Click:Connect(function()
+        if capturingKey then return end
+        capturingKey = true
+        keyBtn.Text = "Aperte uma tecla..."
+        local conn
+        conn = UserInputService.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+            conn:Disconnect()
+            if input.KeyCode ~= Enum.KeyCode.Escape and input.KeyCode ~= Enum.KeyCode.Unknown then
+                CONFIG.MENU_KEY = input.KeyCode.Name
+                saveSettings()
+            end
+            keyBtn.Text = CONFIG.MENU_KEY
+            task.defer(function() capturingKey = false end) -- evita abrir/fechar o menu na mesma tecla
+        end)
+    end)
+
     -- ======================================================
     -- PÁGINA: RESULTADOS DA BUSCA
     -- ======================================================
+    -- ======================================================
+    -- PÁGINA: MOVEMENT
+    -- ======================================================
+    local mv = newPage("movement")
+    pageTitle(mv, "Movement", "Movimento e teleporte.")
+
+    local mvGrid = grid(mv, 2, 56)
+    toggleTile(mvGrid, "Click TP", function() return CONFIG.CLICK_TP end,
+        function(v) CONFIG.CLICK_TP = v end)
+    toggleTile(mvGrid, "Exigir CTRL", function() return CONFIG.CLICK_TP_CTRL end,
+        function(v) CONFIG.CLICK_TP_CTRL = v end)
+
+    settingRow("Altura do teleporte", "Metros acima do ponto clicado", "TP_HEIGHT", true, mv)
+
+    local tpInfo = panel(mv, 78)
+    label(tpInfo, "COMO USAR", 9, C.accent, FONTB, UDim2.new(0, 16, 0, 12), UDim2.new(1, -32, 0, 12))
+    label(tpInfo, "Ligue o Click TP e clique no chão para teleportar até lá.", 11, C.muted, FONT,
+        UDim2.new(0, 16, 0, 30), UDim2.new(1, -32, 0, 14))
+    label(tpInfo, "Com \"Exigir CTRL\" ligado, segure CTRL ao clicar (evita teleportes sem querer).", 11, C.muted, FONT,
+        UDim2.new(0, 16, 0, 48), UDim2.new(1, -32, 0, 14))
+
     local res = newPage("results")
 
     -- ---------- navegação ----------
     local navDefs = {
         { "home",   "Início" },
         { "avatar", "Avatar" },
+        { "movement", "Movement" },
         { "config", "Configurações" },
     }
     local function showPage(key)
@@ -849,6 +1104,11 @@ local function buildMenu()
         { "Tempo limite",           "Espera pela caixa de texto",          "config" },
         { "Intervalo de tentativas","Tempo entre cliques",                 "config" },
         { "Copiar servidor",        "Copia o JobId do servidor",           "home" },
+        { "Nicks favoritos",        "Salvar e usar nicks rapidamente",     "avatar" },
+        { "Tecla do menu",          "Muda a tecla que abre o menu",        "config" },
+        { "Click TP",               "Teleporta até onde você clicar",      "movement" },
+        { "Exigir CTRL",            "Só teleporta com CTRL apertado",      "movement" },
+        { "Altura do teleporte",    "Metros acima do ponto clicado",       "movement" },
     }
 
     local function rebuildResults(q)
@@ -916,12 +1176,8 @@ local function buildMenu()
     end)
 
     -- ---------- janela: minimizar / fechar / arrastar / atalho ----------
-    local minimized = false
-    minBtn.MouseButton1Click:Connect(function()
-        minimized = not minimized
-        main.Size = minimized and UDim2.new(0, W, 0, 54) or UDim2.new(0, W, 0, H)
-        minBtn.Text = minimized and "+" or "-"
-    end)
+    -- minimizar = esconder o menu inteiro (RightShift mostra de novo)
+    minBtn.MouseButton1Click:Connect(function() main.Visible = false end)
     closeBtn.MouseButton1Click:Connect(function() main.Visible = false end)
 
     local dragging, dragStart, startPos
@@ -946,7 +1202,7 @@ local function buildMenu()
         end
     end)
     UserInputService.InputBegan:Connect(function(input, processed)
-        if not processed and input.KeyCode == Enum.KeyCode.RightShift then
+        if not processed and not capturingKey and input.KeyCode.Name == CONFIG.MENU_KEY then
             main.Visible = not main.Visible
         end
     end)
