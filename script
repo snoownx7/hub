@@ -1,4 +1,7 @@
 --[[
+    Auto Copy Avatar ao morrer
+    Roda no CLIENTE (LocalScript / executor).
+
     Fluxo:
       1. Detecta quando você morre
       2. Espera o respawn
@@ -7,7 +10,12 @@
       5. Escreve o nickname na caixa de texto do item
       6. Clica no botão "Copy"
 
-    OBS: os nomes internos da GUI do jogo, então o script
+    NOVO:
+      - Clique no card "AGORA JOGANDO" (Início) para abrir a lista de servidores
+        ativos do jogo, com ping, jogadores e botão de entrar / Rejoin.
+      - Tag OWNER no seu perfil.
+
+    OBS: eu não vejo os nomes internos da GUI do jogo, então o script
     procura a TextBox e o botão pelo texto/tipo. Se o jogo usar nomes
     diferentes, ajuste a seção CONFIG.
 ]]
@@ -27,6 +35,10 @@ local CONFIG = {
     CLICK_TP_CTRL = true,       -- exigir CTRL apertado para teleportar
     TP_HEIGHT = 3,              -- altura acima do ponto clicado
     MENU_KEY = "RightShift",    -- tecla que mostra/esconde o menu
+    STICK_DISTANCE = 3,         -- distância atrás do jogador ao "grudar"
+    HEADSIT_HEIGHT = 1.8,       -- altura acima da cabeça ao sentar
+    SERVER_PAGES = 5,           -- quantas páginas (100 servidores cada) buscar
+    OWNER_TAG = "OWNER",        -- texto da tag no seu perfil
 }
 
 ----------------------------------------------------------------
@@ -289,19 +301,24 @@ player.CharacterAdded:Connect(onCharacter)
 local RunService         = game:GetService("RunService")
 local MarketplaceService = game:GetService("MarketplaceService")
 local Stats              = game:GetService("Stats")
+local TextService        = game:GetService("TextService")
+local TeleportService    = game:GetService("TeleportService")
 
 local C = {
-    bg        = Color3.fromRGB(8, 6, 14),
-    side      = Color3.fromRGB(11, 9, 20),
-    panel     = Color3.fromRGB(18, 15, 32),
-    panel2    = Color3.fromRGB(30, 23, 54),
-    line      = Color3.fromRGB(50, 38, 88),
-    accent    = Color3.fromRGB(139, 92, 246),
-    accentDim = Color3.fromRGB(72, 44, 128),
-    text      = Color3.fromRGB(245, 243, 255),
-    muted     = Color3.fromRGB(150, 140, 178),
+    bg        = Color3.fromRGB(9, 5, 6),
+    side      = Color3.fromRGB(13, 7, 8),
+    panel     = Color3.fromRGB(22, 11, 13),
+    panel2    = Color3.fromRGB(42, 15, 19),
+    line      = Color3.fromRGB(82, 22, 28),
+    accent    = Color3.fromRGB(220, 38, 38),
+    accentDim = Color3.fromRGB(122, 20, 28),
+    text      = Color3.fromRGB(255, 244, 244),
+    muted     = Color3.fromRGB(180, 142, 144),
     ok        = Color3.fromRGB(110, 231, 183),
-    bad       = Color3.fromRGB(248, 113, 113),
+    bad       = Color3.fromRGB(255, 120, 120),
+    warnc     = Color3.fromRGB(250, 204, 21),
+    blood     = Color3.fromRGB(165, 12, 24),
+    bloodDark = Color3.fromRGB(112, 6, 16),
 }
 local FONT  = Enum.Font.GothamMedium
 local FONTB = Enum.Font.GothamBold
@@ -338,6 +355,18 @@ local function label(parent, text, size, color, font, pos, sz, align)
     }, parent)
 end
 
+-- tag "OWNER" (pílula vermelha)
+local function ownerTag(parent, pos)
+    local t = new("TextLabel", {
+        Size = UDim2.new(0, 46, 0, 14), Position = pos,
+        BackgroundColor3 = C.blood, Text = CONFIG.OWNER_TAG, TextColor3 = C.text,
+        Font = FONTB, TextSize = 8, BorderSizePixel = 0,
+    }, parent)
+    round(t, 4)
+    stroke(t, C.accent, 1)
+    return t
+end
+
 local layoutN = 0
 local function ordered(o)
     layoutN += 1
@@ -346,9 +375,41 @@ local function ordered(o)
 end
 
 ----------------------------------------------------------------
--- NICKS FAVORITOS (salvos em arquivo, se o executor tiver writefile)
+-- HTTP (para listar servidores)
 ----------------------------------------------------------------
 local HttpService = game:GetService("HttpService")
+
+local function httpGet(url)
+    local req = (typeof(syn) == "table" and syn.request) or http_request or request
+        or (typeof(http) == "table" and http.request)
+    if typeof(req) == "function" then
+        local ok, r = pcall(req, { Url = url, Method = "GET" })
+        if ok and r and r.Body then return r.Body, r.StatusCode end
+    end
+    local ok, body = pcall(function() return game:HttpGet(url) end)
+    if ok then return body end
+end
+
+-- Entrar de novo no mesmo servidor (ou num novo, se estiver sozinho)
+local function rejoinServer()
+    pcall(function()
+        if #Players:GetPlayers() <= 1 then
+            TeleportService:Teleport(game.PlaceId, player)
+        else
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
+        end
+    end)
+end
+
+local function joinServer(jobId)
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, jobId, player)
+    end)
+end
+
+----------------------------------------------------------------
+-- NICKS FAVORITOS (salvos em arquivo, se o executor tiver writefile)
+----------------------------------------------------------------
 local FAV_FILE = "AvatarHub_favoritos.json"
 local favorites = {}
 
@@ -442,11 +503,11 @@ local function buildMenu()
         local ok, core = pcall(function() return game:GetService("CoreGui") end)
         parent = ok and core or player:WaitForChild("PlayerGui")
     end
-    local old = parent:FindFirstChild("AvatarHubMenu")
+    local old = parent:FindFirstChild("KaosMenu")
     if old then old:Destroy() end
 
     local gui = new("ScreenGui", {
-        Name = "AvatarHubMenu",
+        Name = "KaosMenu",
         ResetOnSpawn = false,
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
         DisplayOrder = 999,
@@ -459,7 +520,7 @@ local function buildMenu()
     -- ---------- estado compartilhado da UI ----------
     local refreshers, logLabels = {}, {}
     local function refreshAll() for _, f in ipairs(refreshers) do f() end end
-    local nickBox, runNow
+    local nickBox, runNow, loadServers
 
     -- ---------- janela ----------
     local W, H = 680, 430
@@ -472,14 +533,41 @@ local function buildMenu()
         Active = true,
     }, gui)
     round(main, 14)
-    stroke(main, C.line)
+    stroke(main, C.blood, 2)
+
+    -- sangue pingando: gotas penduradas a partir da linha y
+    local function drips(parent, y, minLen, maxLen, z, seed)
+        local rnd = Random.new(seed)
+        local x = rnd:NextInteger(8, 24)
+        while x < W - 10 do
+            local len = rnd:NextInteger(minLen, maxLen)
+            local w = rnd:NextInteger(3, 6)
+            local shade = (rnd:NextInteger(0, 1) == 0) and C.blood or C.bloodDark
+            local d = new("Frame", {
+                Size = UDim2.new(0, w, 0, len), Position = UDim2.new(0, x, 0, y),
+                BackgroundColor3 = shade, BorderSizePixel = 0, ZIndex = z,
+            }, parent)
+            round(d, math.floor(w / 2))
+            local dw = w + 3
+            local drop = new("Frame", {
+                Size = UDim2.new(0, dw, 0, dw + 2), Position = UDim2.new(0, x - 1, 0, y + len - dw),
+                BackgroundColor3 = shade, BorderSizePixel = 0, ZIndex = z,
+            }, parent)
+            round(drop, 99)
+            x += rnd:NextInteger(16, 40)
+        end
+    end
 
     -- ================= HEADER =================
     local header = new("Frame", {
         Size = UDim2.new(1, 0, 0, 54), BackgroundColor3 = C.bg, BorderSizePixel = 0,
     }, main)
-    new("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1),
-        BackgroundColor3 = C.line, BorderSizePixel = 0 }, header)
+    -- faixa de sangue no topo + gotas (atrás dos textos: ZIndex 0)
+    new("Frame", { Size = UDim2.new(1, 0, 0, 4), BackgroundColor3 = C.blood,
+        BorderSizePixel = 0, ZIndex = 0 }, header)
+    drips(header, 0, 8, 32, 0, 11)
+    new("Frame", { Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
+        BackgroundColor3 = C.blood, BorderSizePixel = 0 }, header)
 
     -- logo (losango)
     local logo = new("Frame", {
@@ -488,12 +576,12 @@ local function buildMenu()
     }, header)
     round(logo, 6)
     new("UIGradient", {
-        Color = ColorSequence.new(Color3.fromRGB(167, 120, 255), Color3.fromRGB(100, 50, 210)),
+        Color = ColorSequence.new(Color3.fromRGB(240, 70, 70), Color3.fromRGB(150, 10, 20)),
         Rotation = 90,
     }, logo)
-    label(header, "A", 13, C.text, FONTB, UDim2.new(0, 20, 0, 15), UDim2.new(0, 24, 0, 24), Enum.TextXAlignment.Center)
+    label(header, "K", 13, C.text, FONTB, UDim2.new(0, 20, 0, 15), UDim2.new(0, 24, 0, 24), Enum.TextXAlignment.Center)
 
-    label(header, "AVATAR HUB", 16, C.text, FONTB, UDim2.new(0, 56, 0, 8), UDim2.new(0, 150, 0, 20))
+    label(header, "KAOS", 18, C.text, FONTB, UDim2.new(0, 56, 0, 8), UDim2.new(0, 150, 0, 20))
     label(header, "Seu espaço no jogo", 10, C.muted, FONT, UDim2.new(0, 56, 0, 29), UDim2.new(0, 150, 0, 14))
 
     -- busca
@@ -547,9 +635,9 @@ local function buildMenu()
         BackgroundColor3 = C.line, BorderSizePixel = 0 }, side)
     label(side, "NAVEGAÇÃO", 9, C.muted, FONTB, UDim2.new(0, 16, 0, 14), UDim2.new(1, -32, 0, 12))
 
-    -- perfil
+    -- perfil (com tag OWNER)
     local prof = new("Frame", {
-        Size = UDim2.new(1, -16, 0, 46), Position = UDim2.new(0, 8, 1, -54),
+        Size = UDim2.new(1, -16, 0, 58), Position = UDim2.new(0, 8, 1, -66),
         BackgroundColor3 = C.panel, BorderSizePixel = 0,
     }, side)
     round(prof, 10)
@@ -560,7 +648,8 @@ local function buildMenu()
     }, prof)
     round(avatarImg, 15)
     label(prof, player.DisplayName, 11, C.text, FONTB, UDim2.new(0, 46, 0, 8), UDim2.new(1, -52, 0, 14))
-    label(prof, "@" .. player.Name, 9, C.accent, FONT, UDim2.new(0, 46, 0, 24), UDim2.new(1, -52, 0, 12))
+    label(prof, "@" .. player.Name, 9, C.accent, FONT, UDim2.new(0, 46, 0, 23), UDim2.new(1, -52, 0, 12))
+    ownerTag(prof, UDim2.new(0, 46, 0, 38))
     task.spawn(function()
         local ok, img = pcall(function()
             return Players:GetUserThumbnailAsync(player.UserId,
@@ -666,7 +755,7 @@ local function buildMenu()
         }, parent))
         round(b, 10)
         new("UIGradient", {
-            Color = ColorSequence.new(Color3.fromRGB(160, 110, 255), Color3.fromRGB(110, 60, 220)),
+            Color = ColorSequence.new(Color3.fromRGB(235, 60, 60), Color3.fromRGB(160, 14, 24)),
             Rotation = 90,
         }, b)
         b.MouseButton1Click:Connect(fn)
@@ -684,15 +773,22 @@ local function buildMenu()
     banner.ClipsDescendants = true
     stroke(banner, C.accentDim)
     new("UIGradient", {
-        Color = ColorSequence.new(Color3.fromRGB(34, 18, 70), Color3.fromRGB(12, 8, 26)),
+        Color = ColorSequence.new(Color3.fromRGB(70, 10, 16), Color3.fromRGB(14, 6, 8)),
         Rotation = 20,
     }, banner)
     label(banner, "BEM-VINDO DE VOLTA", 9, C.accent, FONTB, UDim2.new(0, 20, 0, 16), UDim2.new(0, 200, 0, 12))
-    label(banner, "AVATAR HUB", 28, C.text, FONTB, UDim2.new(0, 20, 0, 30), UDim2.new(0, 260, 0, 32))
+    label(banner, "KAOS", 30, C.text, FONTB, UDim2.new(0, 20, 0, 30), UDim2.new(0, 260, 0, 32))
     label(banner, "Copie avatares do seu jeito.", 12, C.muted, FONT, UDim2.new(0, 20, 0, 68), UDim2.new(0, 260, 0, 16))
     new("Frame", { Size = UDim2.new(0, 34, 0, 2), Position = UDim2.new(0, 20, 0, 90),
         BackgroundColor3 = C.accent, BorderSizePixel = 0 }, banner)
     label(banner, player.DisplayName, 11, C.text, FONTB, UDim2.new(0, 20, 0, 96), UDim2.new(0, 200, 0, 14))
+    do -- tag OWNER ao lado do nome
+        local okSz, sz = pcall(function()
+            return TextService:GetTextSize(player.DisplayName, 11, FONTB, Vector2.new(1000, 100))
+        end)
+        local nameW = okSz and sz.X or 70
+        ownerTag(banner, UDim2.new(0, 20 + math.min(nameW, 180) + 8, 0, 96))
+    end
     -- decoração
     local d1 = new("Frame", { Size = UDim2.new(0, 120, 0, 120), Position = UDim2.new(1, -90, 0.5, -60),
         BackgroundColor3 = C.accentDim, BackgroundTransparency = 0.6, Rotation = 45, BorderSizePixel = 0 }, banner)
@@ -701,7 +797,7 @@ local function buildMenu()
         BackgroundColor3 = C.accent, Rotation = 45, BorderSizePixel = 0 }, banner)
     round(d2, 14)
     new("UIGradient", {
-        Color = ColorSequence.new(Color3.fromRGB(170, 120, 255), Color3.fromRGB(100, 50, 210)),
+        Color = ColorSequence.new(Color3.fromRGB(240, 70, 70), Color3.fromRGB(150, 10, 20)),
         Rotation = 90,
     }, d2)
     local d3 = new("Frame", { Size = UDim2.new(0, 12, 0, 12), Position = UDim2.new(1, -128, 0.5, -52),
@@ -726,6 +822,7 @@ local function buildMenu()
         b.MouseButton1Click:Connect(function() _G.__AvatarHubGo(target) end)
     end
     navCard("Avatar", "Nick, cópia e testes", "AV", "avatar")
+    navCard("Stalk", "Jogadores do servidor", "ST", "stalk")
     navCard("Movement", "Click TP e movimento", "MV", "movement")
     navCard("Configurações", "Item, botão e tempos", "CF", "config")
 
@@ -734,10 +831,17 @@ local function buildMenu()
 
     local now = new("Frame", { Size = UDim2.new(0.42, -5, 1, 0), BackgroundColor3 = C.panel, BorderSizePixel = 0 }, bottom)
     round(now, 12); stroke(now, C.line)
+
+    -- o card inteiro é clicável: abre a lista de servidores
+    local nowBtn = new("TextButton", {
+        Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), AutoButtonColor = false,
+    }, now)
+
     label(now, "AGORA JOGANDO", 9, C.accent, FONTB, UDim2.new(0, 16, 0, 14), UDim2.new(1, -32, 0, 12))
     local gameName = label(now, "Carregando...", 15, C.text, FONTB, UDim2.new(0, 16, 0, 34), UDim2.new(1, -32, 0, 20))
     local playersLbl = label(now, "", 10, C.muted, FONT, UDim2.new(0, 16, 0, 58), UDim2.new(1, -32, 0, 14))
     label(now, "Funções disponíveis neste jogo.", 10, C.muted, FONT, UDim2.new(0, 16, 0, 84), UDim2.new(1, -32, 0, 14))
+    label(now, "Ver servidores ativos >", 10, C.accent, FONTB, UDim2.new(0, 16, 0, 102), UDim2.new(1, -32, 0, 14))
     local copySrv = new("TextButton", {
         Text = "Copiar servidor", TextColor3 = C.text, Font = FONTB, TextSize = 11,
         BackgroundColor3 = C.panel2, Size = UDim2.new(1, -32, 0, 30),
@@ -752,6 +856,10 @@ local function buildMenu()
             copySrv.Text = "Sem suporte no executor"
         end
         task.delay(1.5, function() copySrv.Text = "Copiar servidor" end)
+    end)
+    nowBtn.MouseButton1Click:Connect(function()
+        _G.__AvatarHubGo("servers")
+        if loadServers then loadServers() end
     end)
     task.spawn(function()
         local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
@@ -879,9 +987,9 @@ local function buildMenu()
         nickBox.Text = name
     end
 
-    local function miniButton(parent, text, x, w, color)
+    local function miniButton(parent, x, w, color)
         local b = new("TextButton", {
-            Text = text, TextColor3 = C.text, Font = FONTB, TextSize = 11,
+            Text = "", TextColor3 = C.text, Font = FONTB, TextSize = 11,
             BackgroundColor3 = color, Size = UDim2.new(0, w, 0, 24),
             Position = UDim2.new(1, x, 0.5, -12), AutoButtonColor = true, BorderSizePixel = 0,
         }, parent)
@@ -1029,9 +1137,6 @@ local function buildMenu()
     end)
 
     -- ======================================================
-    -- PÁGINA: RESULTADOS DA BUSCA
-    -- ======================================================
-    -- ======================================================
     -- PÁGINA: MOVEMENT
     -- ======================================================
     local mv = newPage("movement")
@@ -1052,12 +1157,474 @@ local function buildMenu()
     label(tpInfo, "Com \"Exigir CTRL\" ligado, segure CTRL ao clicar (evita teleportes sem querer).", 11, C.muted, FONT,
         UDim2.new(0, 16, 0, 48), UDim2.new(1, -32, 0, 14))
 
+    -- ======================================================
+    -- PÁGINA: SERVIDORES (lista de servidores ativos do jogo)
+    -- ======================================================
+    local sv = newPage("servers")
+    pageTitle(sv, "Servidores", "Servidores ativos deste jogo, com ping e jogadores.")
+
+    local srvState = { sort = "players", busy = false }
+    local srvData = {}
+
+    local ctl = grid(sv, 4, 34)
+    local function ctlBtn(text, color, strokeColor)
+        local b = ordered(new("TextButton", {
+            Text = text, TextColor3 = C.text, Font = FONTB, TextSize = 11,
+            BackgroundColor3 = color, AutoButtonColor = true, BorderSizePixel = 0,
+        }, ctl))
+        round(b, 9); stroke(b, strokeColor or C.line)
+        return b
+    end
+    local backBtn    = ctlBtn("< Voltar", C.panel)
+    local rejoinBtn  = ctlBtn("Rejoin", C.accentDim, C.accent)
+    local refreshBtn = ctlBtn("Atualizar", C.panel)
+    local sortBtn    = ctlBtn("Ordem: Players", C.panel)
+
+    local srvStatus = ordered(label(sv, "", 10, C.muted, FONT, UDim2.new(), UDim2.new(1, 0, 0, 14)))
+
+    local srvList = ordered(new("Frame", {
+        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    }, sv))
+    new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, srvList)
+
+    local function pingColor(ms)
+        if not ms then return C.muted end
+        if ms < 100 then return C.ok end
+        if ms < 200 then return C.warnc end
+        return C.bad
+    end
+
+    local function renderServers()
+        for _, ch in ipairs(srvList:GetChildren()) do
+            if ch:IsA("GuiObject") then ch:Destroy() end
+        end
+
+        local list = {}
+        for _, s in ipairs(srvData) do table.insert(list, s) end
+        table.sort(list, function(a, b)
+            if srvState.sort == "ping" then
+                return (a.ping or 1e9) < (b.ping or 1e9)
+            end
+            return (a.playing or 0) > (b.playing or 0)
+        end)
+
+        if #list == 0 then
+            local e = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30) }, srvList)
+            label(e, "Nenhum servidor para mostrar.", 11, C.muted, FONT, UDim2.new(), UDim2.new(1, 0, 0, 16))
+            return
+        end
+
+        for i, s in ipairs(list) do
+            local here = (s.id == game.JobId)
+            local row = new("Frame", {
+                BackgroundColor3 = here and C.panel2 or C.panel, LayoutOrder = i,
+                Size = UDim2.new(1, 0, 0, 48), BorderSizePixel = 0,
+            }, srvList)
+            round(row, 10)
+            stroke(row, here and C.accent or C.line)
+
+            label(row, ("%d / %d jogadores"):format(s.playing or 0, s.maxPlayers or 0), 12, C.text, FONTB,
+                UDim2.new(0, 14, 0, 8), UDim2.new(0, 190, 0, 16))
+            local idText = tostring(s.id or "")
+            label(row, (here and "Servidor atual · " or "ID ") .. idText:sub(1, 8), 9,
+                here and C.accent or C.muted, FONT, UDim2.new(0, 14, 0, 26), UDim2.new(0, 190, 0, 12))
+
+            local ping = s.ping and math.floor(s.ping + 0.5) or nil
+            label(row, ping and (ping .. " ms") or "-- ms", 12, pingColor(ping), FONTB,
+                UDim2.new(0, 214, 0, 0), UDim2.new(0, 80, 1, 0))
+
+            local joinB = new("TextButton", {
+                Text = here and "Rejoin" or "Entrar", TextColor3 = C.text, Font = FONTB, TextSize = 11,
+                BackgroundColor3 = here and C.accentDim or C.accent,
+                Size = UDim2.new(0, 84, 0, 28), Position = UDim2.new(1, -98, 0.5, -14),
+                AutoButtonColor = true, BorderSizePixel = 0,
+            }, row)
+            round(joinB, 8)
+            joinB.MouseButton1Click:Connect(function()
+                srvStatus.Text = here and "Reentrando no servidor..." or "Teleportando..."
+                srvStatus.TextColor3 = C.ok
+                if here then rejoinServer() else joinServer(s.id) end
+            end)
+        end
+    end
+
+    loadServers = function()
+        if srvState.busy then return end
+        srvState.busy = true
+        srvStatus.Text = "Buscando servidores..."
+        srvStatus.TextColor3 = C.muted
+        task.spawn(function()
+            local all, cursor, pagesDone, err = {}, nil, 0, nil
+            repeat
+                local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100")
+                    :format(game.PlaceId)
+                if cursor then url ..= "&cursor=" .. cursor end
+
+                local body = httpGet(url)
+                if not body then
+                    err = "Falha na requisição (o executor tem suporte a HTTP?)"
+                    break
+                end
+                local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+                if not ok or typeof(data) ~= "table" or typeof(data.data) ~= "table" then
+                    local msg = ok and typeof(data) == "table" and data.errors
+                        and data.errors[1] and data.errors[1].message
+                    err = msg or "Resposta inválida (limite de requisições?)"
+                    break
+                end
+                for _, s in ipairs(data.data) do table.insert(all, s) end
+                cursor = data.nextPageCursor
+                pagesDone += 1
+                srvStatus.Text = ("Buscando... %d servidores"):format(#all)
+                if cursor then task.wait(0.4) end
+            until not cursor or pagesDone >= CONFIG.SERVER_PAGES
+
+            if #all > 0 then srvData = all end
+            renderServers()
+            if err then
+                srvStatus.Text = (#all > 0 and (#all .. " servidores · aviso: ") or "Erro: ") .. err
+                srvStatus.TextColor3 = C.bad
+            else
+                srvStatus.Text = ("%d servidores ativos"):format(#all)
+                srvStatus.TextColor3 = C.ok
+            end
+            srvState.busy = false
+        end)
+    end
+
+    backBtn.MouseButton1Click:Connect(function() _G.__AvatarHubGo("home") end)
+    rejoinBtn.MouseButton1Click:Connect(function()
+        srvStatus.Text = "Reentrando no servidor..."
+        srvStatus.TextColor3 = C.ok
+        rejoinServer()
+    end)
+    refreshBtn.MouseButton1Click:Connect(function() loadServers() end)
+    sortBtn.MouseButton1Click:Connect(function()
+        srvState.sort = (srvState.sort == "players") and "ping" or "players"
+        sortBtn.Text = "Ordem: " .. (srvState.sort == "players" and "Players" or "Ping")
+        renderServers()
+    end)
+    TeleportService.TeleportInitFailed:Connect(function(_, result, msg)
+        srvStatus.Text = "Falha ao teleportar: " .. tostring(msg or result)
+        srvStatus.TextColor3 = C.bad
+    end)
+
+    -- ======================================================
+    -- PÁGINA: STALK (jogadores online no servidor)
+    -- ======================================================
+    local sk = newPage("stalk")
+    pageTitle(sk, "Stalk", "Jogadores online neste servidor.")
+
+    local skFilter = ordered(new("TextBox", {
+        Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.panel, Text = "",
+        PlaceholderText = "Filtrar jogadores", TextColor3 = C.text, PlaceholderColor3 = C.muted,
+        Font = FONT, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        ClearTextOnFocus = false, BorderSizePixel = 0,
+    }, sk))
+    round(skFilter, 10); stroke(skFilter, C.line)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, skFilter)
+
+    local skCount = ordered(label(sk, "", 10, C.accent, FONTB, UDim2.new(), UDim2.new(1, 0, 0, 14)))
+
+    -- ---------- funções do jogador selecionado (expande na própria linha) ----------
+    local selected, spectating
+    local attachMode, attachTarget -- "stick" (grudar) ou "head" (sentar na cabeça)
+    local statusMsg                -- última mensagem mostrada na linha expandida
+    local ui = {}                  -- botões/labels da linha expandida atual
+    local renderPlayers, loadThumb
+
+    local function refreshDetail(msg)
+        if msg then statusMsg = msg end
+        if not selected or not ui.spectBtn then return end
+
+        local isSpec = (spectating == selected)
+        ui.spectBtn.Text = isSpec and "Parar de spectar" or "Spectar"
+        ui.spectBtn.BackgroundColor3 = isSpec and C.bad or C.accent
+        ui.status.Text = statusMsg or (isSpec and "Spectando agora" or "Selecionado")
+        ui.status.TextColor3 = isSpec and C.ok or C.muted
+
+        local mine   = (attachTarget == selected)
+        local stuck  = mine and attachMode == "stick"
+        local seated = mine and attachMode == "head"
+        ui.stickBtn.Text = stuck and "Soltar" or "Grudar"
+        ui.stickBtn.BackgroundColor3 = stuck and C.bad or C.accentDim
+        ui.headBtn.Text = seated and "Descer da cabeça" or "Sentar na cabeça"
+        ui.headBtn.BackgroundColor3 = seated and C.bad or C.accentDim
+    end
+
+    local function stopSpectate()
+        spectating = nil
+        local cam = workspace.CurrentCamera
+        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        if cam and hum then cam.CameraSubject = hum end
+    end
+
+    local function startSpectate(p)
+        local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+        if not hum then
+            refreshDetail("Jogador sem personagem agora")
+            return
+        end
+        spectating = p
+        workspace.CurrentCamera.CameraSubject = hum
+        statusMsg = nil
+        refreshDetail()
+    end
+
+    local function stopAttach(msg)
+        attachMode, attachTarget = nil, nil
+        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.Sit = false end
+        refreshDetail(msg)
+    end
+
+    local function startAttach(p, mode)
+        if attachMode == mode and attachTarget == p then
+            stopAttach("Solto")
+            return
+        end
+        attachMode, attachTarget = mode, p
+        if mode == "stick" then
+            refreshDetail("Grudado em " .. p.Name)
+        else
+            refreshDetail("Sentado na cabeça de " .. p.Name)
+        end
+    end
+
+    local function deselect()
+        if spectating then stopSpectate() end
+        if attachMode then stopAttach() end
+        selected = nil
+        statusMsg = nil
+        if renderPlayers then renderPlayers() end
+    end
+
+    local function selectPlayer(p)
+        selected = p
+        statusMsg = nil
+        renderPlayers()
+    end
+
+    -- mantém você grudado / sentado no alvo a cada frame
+    RunService.Heartbeat:Connect(function()
+        if not attachMode then return end
+        if not attachTarget or attachTarget.Parent ~= Players then
+            stopAttach("Jogador saiu do servidor")
+            return
+        end
+        local myChar = player.Character
+        local myHrp  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        local tChar  = attachTarget.Character
+        local tHrp   = tChar and tChar:FindFirstChild("HumanoidRootPart")
+        if not (myHrp and tHrp) then return end
+
+        if attachMode == "stick" then
+            myHrp.CFrame = tHrp.CFrame * CFrame.new(0, 0, CONFIG.STICK_DISTANCE)
+        else
+            local head = tChar:FindFirstChild("Head") or tHrp
+            myHrp.CFrame = head.CFrame * CFrame.new(0, head.Size.Y / 2 + CONFIG.HEADSIT_HEIGHT, 0)
+            local hum = myChar:FindFirstChildOfClass("Humanoid")
+            if hum and not hum.Sit then hum.Sit = true end
+        end
+        myHrp.AssemblyLinearVelocity = Vector3.zero
+    end)
+
+    -- mantém a câmera no alvo (respawn dele) e para se ele sair
+    RunService.Heartbeat:Connect(function()
+        if not spectating then return end
+        if spectating.Parent ~= Players then
+            stopSpectate()
+            if selected == spectating then refreshDetail("Jogador saiu do servidor") end
+            return
+        end
+        local cam = workspace.CurrentCamera
+        local hum = spectating.Character and spectating.Character:FindFirstChildOfClass("Humanoid")
+        if cam and hum and cam.CameraSubject ~= hum then
+            cam.CameraSubject = hum
+        end
+    end)
+
+    local skList = ordered(new("Frame", {
+        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    }, sk))
+    new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, skList)
+
+    local thumbs = {}
+    loadThumb = function(img, userId)
+        if thumbs[userId] then
+            img.Image = thumbs[userId]
+            return
+        end
+        task.spawn(function()
+            local ok, content = pcall(function()
+                return Players:GetUserThumbnailAsync(userId,
+                    Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+            end)
+            if ok then
+                thumbs[userId] = content
+                if img.Parent then img.Image = content end
+            end
+        end)
+    end
+
+    renderPlayers = function()
+        if selected and selected.Parent ~= Players then deselect() return end
+        ui = {}
+        for _, ch in ipairs(skList:GetChildren()) do
+            if ch:IsA("GuiObject") then ch:Destroy() end
+        end
+
+        local q = skFilter.Text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+        local list = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.Parent == Players
+                and (q == "" or p.Name:lower():find(q, 1, true) or p.DisplayName:lower():find(q, 1, true)) then
+                table.insert(list, p)
+            end
+        end
+        table.sort(list, function(a, b) return a.Name:lower() < b.Name:lower() end)
+
+        skCount.Text = ("%d jogador(es) no servidor%s"):format(
+            #Players:GetPlayers(), q ~= "" and (" - mostrando " .. #list) or "")
+
+        for i, p in ipairs(list) do
+            local isMe     = (p == player)
+            local expanded = (selected == p) and not isMe
+
+            local row = new("Frame", {
+                BackgroundColor3 = expanded and C.panel2 or C.panel,
+                Size = UDim2.new(1, 0, 0, expanded and 182 or 48),
+                BorderSizePixel = 0, LayoutOrder = i, ClipsDescendants = true,
+            }, skList)
+            round(row, 10)
+            stroke(row, expanded and C.accent or C.line)
+
+            -- cabeçalho da linha (clicar abre/fecha as funções aqui mesmo)
+            local hdr = new("TextButton", {
+                Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
+                Size = UDim2.new(1, 0, 0, 48),
+            }, row)
+            if not isMe then
+                hdr.MouseButton1Click:Connect(function()
+                    if selected == p then deselect() else selectPlayer(p) end
+                end)
+            end
+
+            local img = new("ImageLabel", {
+                Size = UDim2.new(0, 32, 0, 32), Position = UDim2.new(0, 10, 0, 8),
+                BackgroundColor3 = C.panel2, BorderSizePixel = 0, Image = "",
+            }, hdr)
+            round(img, 16)
+            loadThumb(img, p.UserId)
+
+            label(hdr, p.DisplayName .. (isMe and "  (você)" or ""), 12, C.text, FONTB,
+                UDim2.new(0, 52, 0, 8), UDim2.new(1, expanded and -310 or -230, 0, 16))
+            label(hdr, "@" .. p.Name, 10, C.accent, FONT,
+                UDim2.new(0, 52, 0, 26), UDim2.new(1, expanded and -310 or -230, 0, 14))
+            if isMe then
+                ownerTag(hdr, UDim2.new(1, -60, 0, 17))
+            end
+
+            if not isMe and not expanded then
+                -- linha fechada: atalhos rápidos
+                local useBtn  = miniButton(hdr, -150, 48, C.panel2)
+                useBtn.Text = "Usar"
+                local copyBtn = miniButton(hdr, -98, 60, C.accentDim)
+                copyBtn.Text = "Copiar"
+                local favB    = miniButton(hdr, -34, 26, C.panel2)
+                favB.Text = hasFavorite(p.Name) and "OK" or "+"
+
+                useBtn.MouseButton1Click:Connect(function() useNick(p.Name) end)
+                copyBtn.MouseButton1Click:Connect(function()
+                    useNick(p.Name)
+                    runNow()
+                end)
+                favB.MouseButton1Click:Connect(function()
+                    if not hasFavorite(p.Name) then
+                        table.insert(favorites, p.Name)
+                        saveFavorites()
+                        renderFavs()
+                    end
+                    favB.Text = "OK"
+                end)
+            elseif expanded then
+                -- status + fechar no cabeçalho
+                ui.status = label(hdr, "", 10, C.muted, FONT,
+                    UDim2.new(1, -262, 0, 17), UDim2.new(0, 216, 0, 14), Enum.TextXAlignment.Right)
+                local closeB = miniButton(hdr, -34, 26, C.panel)
+                closeB.Text = "X"
+                closeB.MouseButton1Click:Connect(deselect)
+
+                -- botões de função (abrem dentro da própria linha)
+                local function fnBtn(text, col, r, color)
+                    local b = new("TextButton", {
+                        Text = text, TextColor3 = C.text, Font = FONTB, TextSize = 12,
+                        BackgroundColor3 = color, Size = UDim2.new(0.5, -21, 0, 34),
+                        Position = UDim2.new(col * 0.5, col == 0 and 14 or 7, 0, 54 + r * 42),
+                        AutoButtonColor = true, BorderSizePixel = 0,
+                    }, row)
+                    round(b, 9)
+                    return b
+                end
+                ui.spectBtn = fnBtn("Spectar", 0, 0, C.accent)
+                local tpBtn = fnBtn("TP até ele", 1, 0, C.accentDim)
+                ui.stickBtn = fnBtn("Grudar", 0, 1, C.accentDim)
+                ui.headBtn  = fnBtn("Sentar na cabeça", 1, 1, C.accentDim)
+                local useBtn2  = fnBtn("Usar nick", 0, 2, C.panel)
+                local copyBtn2 = fnBtn("Copiar avatar", 1, 2, C.panel)
+                stroke(useBtn2, C.line); stroke(copyBtn2, C.line)
+
+                ui.spectBtn.MouseButton1Click:Connect(function()
+                    if spectating == p then
+                        stopSpectate()
+                        statusMsg = nil
+                        refreshDetail()
+                    else
+                        startSpectate(p)
+                    end
+                end)
+
+                tpBtn.MouseButton1Click:Connect(function()
+                    local myHrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                    local tHrp  = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+                    if myHrp and tHrp then
+                        myHrp.CFrame = tHrp.CFrame * CFrame.new(0, 0, 3) -- 3 studs atrás dele
+                        refreshDetail("Teleportado até " .. p.Name)
+                    else
+                        refreshDetail("Não foi possível teleportar agora")
+                    end
+                end)
+
+                ui.stickBtn.MouseButton1Click:Connect(function() startAttach(p, "stick") end)
+                ui.headBtn.MouseButton1Click:Connect(function() startAttach(p, "head") end)
+
+                useBtn2.MouseButton1Click:Connect(function()
+                    useNick(p.Name)
+                    refreshDetail("Nick definido como alvo")
+                end)
+                copyBtn2.MouseButton1Click:Connect(function()
+                    useNick(p.Name)
+                    runNow()
+                    refreshDetail("Copiando avatar...")
+                end)
+
+                refreshDetail()
+            end
+        end
+    end
+
+    skFilter:GetPropertyChangedSignal("Text"):Connect(renderPlayers)
+    Players.PlayerAdded:Connect(function() task.defer(renderPlayers) end)
+    Players.PlayerRemoving:Connect(function() task.defer(renderPlayers) end)
+    renderPlayers()
+
     local res = newPage("results")
 
     -- ---------- navegação ----------
     local navDefs = {
         { "home",   "Início" },
         { "avatar", "Avatar" },
+        { "stalk", "Stalk" },
         { "movement", "Movement" },
         { "config", "Configurações" },
     }
@@ -1065,7 +1632,7 @@ local function buildMenu()
         for k, p in pairs(pages) do p.Visible = (k == key) end
         if key ~= "results" then currentPage = key end
         for k, nb in pairs(navButtons) do
-            local active = (k == key)
+            local active = (k == key) or (key == "servers" and k == "home")
             nb.btn.BackgroundTransparency = active and 0.35 or 1
             nb.btn.BackgroundColor3 = C.accentDim
             nb.stroke.Enabled = active
@@ -1104,8 +1671,11 @@ local function buildMenu()
         { "Tempo limite",           "Espera pela caixa de texto",          "config" },
         { "Intervalo de tentativas","Tempo entre cliques",                 "config" },
         { "Copiar servidor",        "Copia o JobId do servidor",           "home" },
+        { "Servidores",             "Lista de servidores, ping e rejoin",  "servers" },
+        { "Rejoin",                 "Entrar de novo no servidor",          "servers" },
         { "Nicks favoritos",        "Salvar e usar nicks rapidamente",     "avatar" },
         { "Tecla do menu",          "Muda a tecla que abre o menu",        "config" },
+        { "Stalk",                  "Lista de jogadores no servidor",      "stalk" },
         { "Click TP",               "Teleporta até onde você clicar",      "movement" },
         { "Exigir CTRL",            "Só teleporta com CTRL apertado",      "movement" },
         { "Altura do teleporte",    "Metros acima do ponto clicado",       "movement" },
@@ -1131,6 +1701,7 @@ local function buildMenu()
                 b.MouseButton1Click:Connect(function()
                     searchBox.Text = ""
                     showPage(f[3])
+                    if f[3] == "servers" and loadServers then loadServers() end
                 end)
             end
         end
@@ -1206,6 +1777,9 @@ local function buildMenu()
             main.Visible = not main.Visible
         end
     end)
+
+    -- gotas de sangue escorrendo da linha do cabeçalho (por cima do conteúdo, sem bloquear cliques)
+    drips(main, 54, 5, 14, 5, 42)
 
     showPage("home")
 end
