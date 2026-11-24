@@ -14,7 +14,6 @@
 local CONFIG = {
     TOOL_NAME   = "Controller", -- nome do item (Tool) na mochila
     TARGET_NICK = "auv1u",      -- nickname a ser escrito
-    AUTO_ON     = true,         -- rodar automaticamente ao morrer
     BUTTON_TEXT = "Copy",       -- texto do botão de confirmar
     DELAY_AFTER_EQUIP = 0.1,    -- tempo p/ a GUI do item abrir
     TIMEOUT = 7,                -- tempo máx. esperando o item/GUI
@@ -63,71 +62,7 @@ local TextChatService    = game:GetService("TextChatService")
 local ReplicatedStorage  = game:GetService("ReplicatedStorage")
 local player             = Players.LocalPlayer
 
-----------------------------------------------------------------
--- ARQUIVOS (pasta do executor: workspace/KAOS/)
-----------------------------------------------------------------
-local FOLDER = "KAOS"
-local hasFS = typeof(writefile) == "function" and typeof(readfile) == "function" and typeof(isfile) == "function"
-local useFolder = false
-if hasFS and typeof(makefolder) == "function" and typeof(isfolder) == "function" then
-    pcall(function() if not isfolder(FOLDER) then makefolder(FOLDER) end end)
-    local ok, r = pcall(isfolder, FOLDER)
-    useFolder = ok and r == true
-end
-local function filePath(name) return (useFolder and (FOLDER .. "/") or (FOLDER .. "_")) .. name end
-
--- lê KAOS/<name>; se não existir, tenta o arquivo antigo (AvatarHub_*) pra migrar
-local function readJson(name, legacy)
-    if not hasFS then return end
-    local ok, data = pcall(function()
-        local f = filePath(name)
-        if isfile(f) then return HttpService:JSONDecode(readfile(f)) end
-        if legacy and isfile(legacy) then return HttpService:JSONDecode(readfile(legacy)) end
-    end)
-    if ok and typeof(data) == "table" then return data end
-end
-
-local function writeJson(name, data)
-    if typeof(writefile) ~= "function" then return end
-    pcall(function() writefile(filePath(name), HttpService:JSONEncode(data)) end)
-end
-
--- chaves que NÃO são lidas do arquivo (ficam fixas no script, ninguém forja cargo)
-local LOCKED = { OWNER_IDS = true, OWNER_TAG = true, ROLES_URL = true, PRESENCE_URL = true }
-local CONFIG_FILE = "config.json"
-local rawCfg = CONFIG
-
-do
-    local saved = readJson(CONFIG_FILE, "AvatarHub_config.json")
-    if saved then
-        for k, v in pairs(saved) do
-            if not LOCKED[k] and rawCfg[k] ~= nil and typeof(rawCfg[k]) == typeof(v) then rawCfg[k] = v end
-        end
-    end
-    local okKey = pcall(function() return Enum.KeyCode[rawCfg.MENU_KEY] end)
-    if not okKey or not Enum.KeyCode[rawCfg.MENU_KEY] then rawCfg.MENU_KEY = "RightShift" end
-end
-
-local saveQueued = false
-local function saveSettings()
-    if saveQueued then return end
-    saveQueued = true
-    task.delay(0.4, function()
-        saveQueued = false
-        local out = {}
-        for k, v in pairs(rawCfg) do if not LOCKED[k] then out[k] = v end end
-        writeJson(CONFIG_FILE, out)
-    end)
-end
-
--- qualquer alteração no CONFIG durante o uso é salva sozinha
-CONFIG = setmetatable({}, {
-    __index = rawCfg,
-    __newindex = function(_, k, v) rawCfg[k] = v saveSettings() end,
-})
-saveSettings() -- cria o arquivo na primeira vez
-
-local autoEnabled = CONFIG.AUTO_ON ~= false -- rodar automaticamente ao morrer
+local autoEnabled = true -- rodar automaticamente ao morrer
 local running     = false
 local alive       = true -- vira false quando o script é morto
 local menuGui            -- ScreenGui do menu (pra ignorar na busca da GUI do jogo)
@@ -163,14 +98,13 @@ local function killScript()
     autoEnabled, running, statusHook = false, false, nil
     if menuGui then pcall(function() menuGui:Destroy() end) end
     menuGui = nil
-    _print("[KAOS] Script encerrado.")
+    _print("[AvatarHub] Script encerrado.")
 end
 
 -- executar de novo mata a instância anterior (evita conexões duplicadas)
 local env = (typeof(getgenv) == "function" and getgenv()) or _G
-if typeof(env.__AvatarHubKill) == "function" then pcall(env.__AvatarHubKill) end -- versão antiga
-if typeof(env.__KAOSKill) == "function" then pcall(env.__KAOSKill) end
-env.__KAOSKill = killScript
+if typeof(env.__AvatarHubKill) == "function" then pcall(env.__AvatarHubKill) end
+env.__AvatarHubKill = killScript
 
 -- detecta se o jogo atual é o Ro-vibes (GameId, PlaceId ou nome; com tentativas)
 local function detectGame()
@@ -306,13 +240,13 @@ local function doRoutine()
     running = true
 
     local function stop(msg)
-        warn("[KAOS] " .. msg)
+        warn("[AutoCopy] " .. msg)
         running = false
     end
 
     local exists, userId = usernameExists(CONFIG.TARGET_NICK)
     if not exists then return stop(("Usuário '%s' NÃO existe."):format(CONFIG.TARGET_NICK)) end
-    print(("[KAOS] Usuário confirmado: %s (UserId %d)"):format(CONFIG.TARGET_NICK, userId))
+    print(("[AutoCopy] Usuário confirmado: %s (UserId %d)"):format(CONFIG.TARGET_NICK, userId))
 
     local tool = waitForTool(CONFIG.TOOL_NAME)
     if not tool then return stop("Item '" .. CONFIG.TOOL_NAME .. "' não encontrado.") end
@@ -344,7 +278,7 @@ local function doRoutine()
     if not btn then return stop("Botão '" .. CONFIG.BUTTON_TEXT .. "' não encontrado.") end
 
     clickButton(btn)
-    print("[KAOS] Avatar copiado de " .. CONFIG.TARGET_NICK)
+    print("[AutoCopy] Avatar copiado de " .. CONFIG.TARGET_NICK)
     running = false
 end
 
@@ -360,7 +294,7 @@ local function onCharacter(c)
     if not hum or not alive then return end
     on(hum.Died, function()
         if not canAuto() then return end
-        print("[KAOS] Você morreu. Aguardando respawn...")
+        print("[AutoCopy] Você morreu. Aguardando respawn...")
         markPendingSkin()
     end)
     if pendingAt and os.clock() - pendingAt < 40 then
@@ -625,7 +559,7 @@ local function platformKey()
     if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then return "mobile" end
     return "pc"
 end
-local function platformIcon(k) return k == "mobile" and "\u{1F4F1}" or "\u{1F5A5}" end
+local function platformIcon(k) return k == "mobile" and "📱" or "🖥" end
 
 local function applyTag(plr)
     local info = tracked[plr]
@@ -738,14 +672,38 @@ local function joinServer(jobId)
 end
 
 ----------------------------------------------------------------
--- FAVORITOS (KAOS/favoritos.json)
+-- ARQUIVOS (favoritos + tecla do menu, se o executor tiver writefile)
 ----------------------------------------------------------------
-local FAV_FILE = "favoritos.json"
+local FAV_FILE, SETTINGS_FILE = "AvatarHub_favoritos.json", "AvatarHub_config.json"
 local favorites = {}
-for _, n in ipairs(readJson(FAV_FILE, "AvatarHub_favoritos.json") or {}) do
+local canRead = typeof(isfile) == "function" and typeof(readfile) == "function"
+
+local function readJson(file)
+    if not canRead then return end
+    local ok, data = pcall(function()
+        if isfile(file) then return HttpService:JSONDecode(readfile(file)) end
+    end)
+    if ok and typeof(data) == "table" then return data end
+end
+
+local function writeJson(file, data)
+    if typeof(writefile) == "function" then
+        pcall(function() writefile(file, HttpService:JSONEncode(data)) end)
+    end
+end
+
+for _, n in ipairs(readJson(FAV_FILE) or {}) do
     if typeof(n) == "string" then table.insert(favorites, n) end
 end
+do
+    local cfg = readJson(SETTINGS_FILE)
+    if cfg and typeof(cfg.MENU_KEY) == "string" and Enum.KeyCode[cfg.MENU_KEY] then
+        CONFIG.MENU_KEY = cfg.MENU_KEY
+    end
+end
+
 local function saveFavorites() writeJson(FAV_FILE, favorites) end
+local function saveSettings()  writeJson(SETTINGS_FILE, { MENU_KEY = CONFIG.MENU_KEY }) end
 
 local function hasFavorite(name)
     for i, n in ipairs(favorites) do
@@ -1168,4 +1126,40 @@ local function buildMenu()
 
     local copySrv = button(now, "Copiar servidor", C.panel2, UDim2.new(1, -32, 0, 30), UDim2.new(0, 16, 1, -44), 11)
     stroke(copySrv)
-    copySrv.MouseButt... (45 KB left)
+    copySrv.MouseButton1Click:Connect(function()
+        if typeof(setclipboard) == "function" then
+            setclipboard(game.JobId ~= "" and game.JobId or tostring(game.PlaceId))
+            copySrv.Text = "Copiado!"
+        else
+            copySrv.Text = "Sem suporte no executor"
+        end
+        task.delay(1.5, function() copySrv.Text = "Copiar servidor" end)
+    end)
+
+    local function updatePlayers()
+        playersLbl.Text = ("%d / %d jogadores"):format(#Players:GetPlayers(), Players.MaxPlayers)
+    end
+    updatePlayers()
+    on(Players.PlayerAdded, updatePlayers)
+    on(Players.PlayerRemoving, function() task.defer(updatePlayers) end)
+
+    -- favoritos rápidos
+    local favs = new("Frame", { Size = UDim2.new(0.58, -5, 1, 0), Position = UDim2.new(0.42, 5, 0, 0),
+        BackgroundColor3 = C.panel, BorderSizePixel = 0 }, bottom)
+    round(favs, 12); stroke(favs)
+    label(favs, "Seus favoritos", 13, C.text, FONTB, UDim2.new(0, 16, 0, 12), UDim2.new(1, -32, 0, 16))
+    label(favs, "Ligue, desligue ou execute rapidamente", 9, C.muted, FONT, UDim2.new(0, 16, 0, 30), UDim2.new(1, -32, 0, 12))
+    local favGrid = new("Frame", { BackgroundTransparency = 1, Position = UDim2.new(0, 12, 0, 50),
+        Size = UDim2.new(1, -24, 0, 0), AutomaticSize = Enum.AutomaticSize.Y }, favs)
+    new("UIGridLayout", { CellSize = UDim2.new(0.5, -5, 0, 56), CellPadding = UDim2.new(0, 10, 0, 8),
+        SortOrder = Enum.SortOrder.LayoutOrder }, favGrid)
+
+    local function autoToggle(target)
+        return toggleTile(target, "Auto ao morrer", function() return autoEnabled end, function(v) autoEnabled = v end)
+    end
+    local function screenClickToggle(target)
+        return toggleTile(target, "Clique na tela", function() return CONFIG.USE_SCREEN_CLICK end,
+            function(v) CONFIG.USE_SCREEN_CLICK = v end)
+    end
+    local function clickTpToggle(target)
+        r... (43 KB left)
