@@ -625,7 +625,7 @@ local function platformKey()
     if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then return "mobile" end
     return "pc"
 end
-local function platformIcon(k) return k == "mobile" and "📱" or "🖥" end
+local function platformIcon(k) return k == "mobile" and "\u{1F4F1}" or "\u{1F5A5}" end
 
 local function applyTag(plr)
     local info = tracked[plr]
@@ -1168,4 +1168,4 @@ local function buildMenu()
 
     local copySrv = button(now, "Copiar servidor", C.panel2, UDim2.new(1, -32, 0, 30), UDim2.new(0, 16, 1, -44), 11)
     stroke(copySrv)
-    copySrv.MouseButton1Click:C... (45 KB left)
+    copySrv.MouseButt... (45 KB left)
