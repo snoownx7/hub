@@ -13,30 +13,30 @@
 ----------------------------------------------------------------
 local CONFIG = {
     TOOL_NAME   = "Controller", -- nome do item (Tool) na mochila
-    TARGET_NICK = "auv1u",      -- nickname a ser escrito
+    TARGET_NICK = "",      -- nickname a ser escrito
     BUTTON_TEXT = "Copy",       -- texto do botão de confirmar
     DELAY_AFTER_EQUIP = 0.6,    -- tempo p/ a GUI do item abrir
     TIMEOUT = 8,                -- tempo máx. esperando o item/GUI
     RETRY_EVERY = 1.5,          -- intervalo entre tentativas de "clicar" no item
     USE_SCREEN_CLICK = true,    -- clique de mouse na tela depois de equipar
-    CLICK_TP = false,           -- Click TP ligado/desligado
+    CLICK_TP = true,           -- Click TP ligado/desligado
     CLICK_TP_CTRL = true,       -- exigir CTRL para teleportar
     TP_HEIGHT = 3,              -- altura acima do ponto clicado
-    ANTI_AFK = false,           -- evita kick por ficar parado
-    MENU_KEY = "RightShift",    -- tecla que mostra/esconde o menu
+    ANTI_AFK = true,           -- evita kick por ficar parado
+    MENU_KEY = "B",    -- tecla que mostra/esconde o menu
     STICK_DISTANCE = 3,         -- distância atrás do jogador ao "grudar"
     HEADSIT_HEIGHT = 1.8,       -- altura acima da cabeça ao sentar
     SERVER_PAGES = 5,           -- páginas (100 servidores cada) na lista de servidores
     OWNER_TAG = "OWNER",        -- tag dos donos
     USER_TAG = "USER",          -- tag de quem não é dono
-    OWNER_NAMES = { "fether99" }, -- donos pelo nome (resolvido ao iniciar)
+    OWNER_NAMES = { "snoownkkj" }, -- donos pelo nome (resolvido ao iniciar)
     OWNER_IDS = {},             -- donos pelo UserId (mais seguro): { [123456789] = true }
     SHOW_TAGS = true,           -- mostra as tags acima da cabeça
     SHARE_PRESENCE = true,      -- avisa os outros usuários do script que você está usando
     PRESENCE_URL = "",          -- Firebase Realtime Database (ou similar) que compartilha as tags
     GAME_TAB_NAME = "Rovibes",  -- nome da aba exclusiva do jogo
-    ROVIBES_PLACE_IDS = { 6808306281 }, -- PlaceId/UniverseId do Ro-vibes (o nome muda conforme o idioma da conta)
-    FORCE_ROVIBES = false,      -- força o modo Rovibes se a detecção falhar
+    ROVIBES_PLACE_IDS = { 6808306281, }, -- PlaceId/UniverseId do Ro-vibes (o nome muda conforme o idioma da conta)
+    FORCE_ROVIBES = true,      -- força o modo Rovibes se a detecção falhar
     RE_COMMAND = "/re",         -- comando de respawn do jogo
     AUTO_SKIN_RE = true,        -- recoloca a skin depois de um /re
     ANTI_FLING = false,         -- bloqueia fling (Ro-vibes)
